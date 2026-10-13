@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+node "$ROOT_DIR/Scripts/sync-sources.js"
 DERIVED_DATA_DIR="${DERIVED_DATA_DIR:-$ROOT_DIR/.build/DerivedData}"
 APP_PATH="$DERIVED_DATA_DIR/Build/Products/Debug/Viddeo.app"
 

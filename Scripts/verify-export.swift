@@ -3,6 +3,7 @@ import AppKit
 import CoreMedia
 import CoreVideo
 import Foundation
+import ImageIO
 
 @main
 struct VerifyExport {
@@ -37,7 +38,15 @@ struct VerifyExport {
             eventCaptureAvailable: true
         )
         try session.save(in: directory)
-        try await OfflineExporter().export(session: session, directory: directory, destination: outputURL)
+        // The default preset is 720p, so this 640×360 fixture is upscaled 2× to 1280×720.
+        // Relative checks (marker ratio, center color, edges) are resolution independent.
+        let defaultSettings = ExportSettings.mp4Default
+        let expectedSize = defaultSettings.outputSize(sourceWidth: width, sourceHeight: height)
+        guard expectedSize == (1280, 720) else {
+            throw VerificationError.failed("default preset size is \(expectedSize), expected 1280×720")
+        }
+        try await OfflineExporter().export(session: session, directory: directory, destination: outputURL,
+                                           settings: defaultSettings)
 
         let outputAsset = AVURLAsset(url: outputURL)
         let outDuration = try await outputAsset.load(.duration).seconds
@@ -47,9 +56,13 @@ struct VerifyExport {
         let tracks = try await outputAsset.loadTracks(withMediaType: .video)
         guard let track = tracks.first else { throw VerificationError.failed("export has no video track") }
         let naturalSize = try await track.load(.naturalSize)
-        guard Int(naturalSize.width.rounded()) == width,
-              Int(naturalSize.height.rounded()) == height else {
-            throw VerificationError.failed("export dimensions are \(naturalSize), expected \(width)×\(height)")
+        guard Int(naturalSize.width.rounded()) == expectedSize.width,
+              Int(naturalSize.height.rounded()) == expectedSize.height else {
+            throw VerificationError.failed("export dimensions are \(naturalSize), expected \(expectedSize.width)×\(expectedSize.height)")
+        }
+        let defaultRate = try await track.load(.nominalFrameRate)
+        guard abs(Double(defaultRate) - 60) < 1.5 else {
+            throw VerificationError.failed("default export frame rate is \(defaultRate), expected 60")
         }
         let audioTracks = try await outputAsset.loadTracks(withMediaType: .audio)
         guard audioTracks.count == 2 else {
@@ -177,7 +190,237 @@ struct VerifyExport {
             // Expected strict duration check.
         }
 
-        print("Offline export verified: H.264, \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges.")
+        try await verifyPresets(session: session, directory: directory, duration: duration)
+        try await verifyGIF(session: session, directory: directory, duration: duration)
+
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges.")
+    }
+
+    private static func verifyPresets(session: RecordingSession, directory: URL, duration: Double) async throws {
+        // (a) 1080p / 30 fps / HEVC.
+        let hevcURL = directory.appendingPathComponent("hevc-1080p30.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: hevcURL,
+                                           settings: ExportSettings(fps: 30, height: 1080, codec: .h265))
+        let hevc = try await probe(hevcURL)
+        guard hevc.codec == kCMVideoCodecType_HEVC, hevc.width == 1920, hevc.height == 1080,
+              abs(hevc.fps - 30) < 1, abs(hevc.duration - duration) < 0.2, hevc.audioTracks == 2 else {
+            throw VerificationError.failed("1080p30 HEVC export probed as \(hevc)")
+        }
+
+        // (b) `both` writes the H.264 file and an -h265 sibling, refusing if either exists.
+        let bothDirectory = directory.appendingPathComponent("both", isDirectory: true)
+        try FileManager.default.createDirectory(at: bothDirectory, withIntermediateDirectories: true)
+        let socialSettings = ExportSettings(quality: .socialMedia, fps: 30, height: 720, codec: .both)
+        let bothURL = bothDirectory.appendingPathComponent("export.mp4")
+        let written = try await OfflineExporter().export(session: session, directory: directory,
+                                                         destination: bothURL, settings: socialSettings)
+        let h265URL = bothDirectory.appendingPathComponent("export-h265.mp4")
+        guard written.map(\.lastPathComponent) == ["export.mp4", "export-h265.mp4"] else {
+            throw VerificationError.failed("both-codec export returned \(written)")
+        }
+        let bothH264 = try await probe(bothURL)
+        let bothHEVC = try await probe(h265URL)
+        guard bothH264.codec == kCMVideoCodecType_H264, bothHEVC.codec == kCMVideoCodecType_HEVC,
+              bothH264.width == 1280, bothHEVC.width == 1280, bothH264.height == 720, bothHEVC.height == 720,
+              bothH264.audioTracks == 2, bothHEVC.audioTracks == 2 else {
+            throw VerificationError.failed("both-codec outputs probed as \(bothH264) and \(bothHEVC)")
+        }
+        // Destination itself exists.
+        do {
+            try await OfflineExporter().export(session: session, directory: directory,
+                                               destination: bothURL, settings: socialSettings)
+            throw VerificationError.failed("both-codec export overwrote an existing H.264 destination")
+        } catch OfflineExporter.ExportError.outputExists {}
+        // Only the -h265 sibling exists: nothing may be written.
+        let againURL = bothDirectory.appendingPathComponent("again.mp4")
+        let againH265 = bothDirectory.appendingPathComponent("again-h265.mp4")
+        try Data("keep".utf8).write(to: againH265)
+        do {
+            try await OfflineExporter().export(session: session, directory: directory,
+                                               destination: againURL, settings: socialSettings)
+            throw VerificationError.failed("both-codec export overwrote an existing -h265 destination")
+        } catch OfflineExporter.ExportError.outputExists {}
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: bothDirectory.path).sorted()
+        guard leftovers == ["again-h265.mp4", "export-h265.mp4", "export.mp4"],
+              try Data(contentsOf: againH265) == Data("keep".utf8) else {
+            throw VerificationError.failed("refused both-codec export left \(leftovers)")
+        }
+
+        // (c) Bitrate follows the observed bits-per-pixel model. Rate control treats the value as
+        // a ceiling-ish target: ordinary content must not overshoot it, and the quality tiers must
+        // order by the model. (Incompressible per-frame noise was rejected as a fixture: no encoder
+        // can meet a 1.4 Mb/s target on it, which says nothing about the exporter.)
+        var rates: [ExportQuality: Double] = [:]
+        for quality in [ExportQuality.webLow, .socialMedia, .studio] {
+            let tier = ExportSettings(quality: quality, fps: 30, height: 720, codec: .h264)
+            let tierURL = directory.appendingPathComponent("tier-\(quality.rawValue).mp4")
+            try await OfflineExporter().export(session: session, directory: directory,
+                                               destination: tierURL, settings: tier)
+            let measured = try await probe(tierURL)
+            let target = Double(tier.videoBitsPerSecond(width: 1280, height: 720))
+            guard measured.width == 1280, measured.height == 720,
+                  measured.dataRate <= 1.35 * target || quality == .webLow else {
+                throw VerificationError.failed(
+                    "\(quality.rawValue) video bitrate \(Int(measured.dataRate)) b/s overshoots \(Int(target)) b/s"
+                )
+            }
+            rates[quality] = measured.dataRate
+        }
+        guard let low = rates[.webLow], let social = rates[.socialMedia], let studio = rates[.studio],
+              low < social, social < studio, studio > 1.5 * social else {
+            throw VerificationError.failed("quality tiers do not order by bitrate: \(rates)")
+        }
+
+        // (d) 9:16 keeps the 16:9 source whole, centered between black bars.
+        let tallSettings = ExportSettings(fps: 30, height: 720, aspectRatio: .preset(.tall))
+        let tallURL = directory.appendingPathComponent("tall.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: tallURL,
+                                           settings: tallSettings)
+        let tall = try await probe(tallURL)
+        guard tall.width == 404, tall.height == 720, tall.codec == kCMVideoCodecType_H264 else {
+            throw VerificationError.failed("9:16 export probed as \(tall), expected 404×720 H.264")
+        }
+        let tallAsset = AVURLAsset(url: tallURL)
+        // Content is 404×227.25 centered vertically; top-left normalized y of source y=0.3.
+        let contentTop = (720 - 227.25) / 2
+        for time in [0.5, 3.5] {
+            for y in [0.05, 0.95] {
+                let bar = try await sampleColor(asset: tallAsset, time: time, x: 0.5, y: y)
+                guard Int(bar.red) + Int(bar.green) + Int(bar.blue) < 45 else {
+                    throw VerificationError.failed("9:16 bar at y \(y), \(time)s is \(bar), expected black")
+                }
+            }
+        }
+        let unzoomed = try await sampleColor(asset: tallAsset, time: 0.5, x: 0.3,
+                                             y: (contentTop + 0.3 * 227.25) / 720)
+        guard unzoomed.matches(colorQuadrant(x: 0.3, y: 0.3)) else {
+            throw VerificationError.failed("9:16 unzoomed content sample is \(unzoomed), expected blue")
+        }
+        let zoomedCenter = try await sampleColor(asset: tallAsset, time: 3.5, x: 0.5, y: 0.5)
+        guard zoomedCenter.matches(colorQuadrant(x: 0.75, y: 0.25)) else {
+            throw VerificationError.failed("9:16 zoomed center is \(zoomedCenter), expected the green top-right region")
+        }
+        let tallMarker = try await markerBounds(asset: tallAsset, time: 3.5)
+        guard tallMarker.minY > contentTop - 1, tallMarker.maxY < 720 - contentTop + 1,
+              // The zoom spring is still settling at 3.5 s (the full-frame check allows ±0.08 of the
+              // source); at 2× over a 404 px wide content area, ±0.04 source units is ±32 px.
+              abs(tallMarker.midX - 202) < 32, abs(tallMarker.midY - 360) < 32 else {
+            throw VerificationError.failed("9:16 zoomed marker is at \(tallMarker), expected centered in the content")
+        }
+    }
+
+    private static func verifyGIF(session: RecordingSession, directory: URL, duration: Double) async throws {
+        guard GifExporter.delays(frameCount: 30, fps: 30).reduce(0, +) == 100,
+              GifExporter.delays(frameCount: 15, fps: 15).reduce(0, +) == 100 else {
+            throw VerificationError.failed("GIF centisecond delays drift from the requested frame rate")
+        }
+        let settings = ExportSettings.gifDefault
+        let expected = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+        let expectedFrames = Int((duration * Double(settings.fps)).rounded())
+        for disableLoop in [false, true] {
+            var current = settings
+            current.gifDisableLoop = disableLoop
+            let url = directory.appendingPathComponent(disableLoop ? "once.gif" : "loop.gif")
+            try await OfflineExporter().export(session: session, directory: directory, destination: url,
+                                               settings: current)
+            let data = try Data(contentsOf: url)
+            // ImageIO labels animated output GIF87a; frame count, delays and the loop block below are
+            // what actually define the animation, so either valid signature is accepted.
+            guard data.prefix(6) == Data("GIF89a".utf8) || data.prefix(6) == Data("GIF87a".utf8),
+                  data.count > 13 else {
+                throw VerificationError.failed("GIF does not start with a GIF signature (\(data.count) bytes, prefix \(Array(data.prefix(12))))")
+            }
+            let screenWidth = Int(data[6]) | Int(data[7]) << 8
+            let screenHeight = Int(data[8]) | Int(data[9]) << 8
+            guard screenWidth == expected.width, screenHeight == expected.height,
+                  screenWidth % 2 == 0, screenHeight % 2 == 0 else {
+                throw VerificationError.failed("GIF canvas is \(screenWidth)×\(screenHeight), expected \(expected)")
+            }
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                throw VerificationError.failed("ImageIO cannot read the exported GIF")
+            }
+            let count = CGImageSourceGetCount(source)
+            guard abs(count - expectedFrames) <= 1 else {
+                throw VerificationError.failed("GIF has \(count) frames, expected \(expectedFrames)")
+            }
+            var total = 0.0
+            for index in 0..<count {
+                let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+                let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+                total += (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double)
+                    ?? (gif?[kCGImagePropertyGIFDelayTime] as? Double) ?? 0
+            }
+            guard abs(total - duration) <= 0.1 * duration else {
+                throw VerificationError.failed("GIF plays for \(total)s, expected about \(duration)s")
+            }
+            let loopCount = netscapeLoopCount(data)
+            if disableLoop {
+                guard loopCount == nil else {
+                    throw VerificationError.failed("GIF with looping disabled still has loop count \(loopCount ?? -1)")
+                }
+            } else {
+                guard loopCount == 0 else {
+                    throw VerificationError.failed("looping GIF has NETSCAPE2.0 loop count \(String(describing: loopCount))")
+                }
+                // Frame at 3.5 s shows the zoomed top-right (green) region at its center.
+                let zoomIndex = Int(3.5 * Double(settings.fps))
+                guard let image = CGImageSourceCreateImageAtIndex(source, zoomIndex, nil) else {
+                    throw VerificationError.failed("could not decode GIF frame \(zoomIndex)")
+                }
+                let rep = NSBitmapImageRep(cgImage: image)
+                guard let color = rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
+                      RGB(red: UInt8(color.redComponent * 255), green: UInt8(color.greenComponent * 255),
+                          blue: UInt8(color.blueComponent * 255)).matches(colorQuadrant(x: 0.75, y: 0.25)) else {
+                    throw VerificationError.failed("GIF zoom frame center does not show the green region")
+                }
+            }
+            do {
+                try await OfflineExporter().export(session: session, directory: directory, destination: url,
+                                                   settings: current)
+                throw VerificationError.failed("GIF export overwrote an existing destination")
+            } catch OfflineExporter.ExportError.outputExists {}
+        }
+        let partials = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains(".partial.") }
+        guard partials.isEmpty else { throw VerificationError.failed("temporary exports were left behind: \(partials)") }
+    }
+
+    /// Returns the NETSCAPE2.0 application extension loop count, or nil when absent.
+    private static func netscapeLoopCount(_ data: Data) -> Int? {
+        let marker = Data("NETSCAPE2.0".utf8)
+        guard let range = data.range(of: marker), data.count >= range.upperBound + 4,
+              data[range.upperBound] == 3, data[range.upperBound + 1] == 1 else { return nil }
+        return Int(data[range.upperBound + 2]) | Int(data[range.upperBound + 3]) << 8
+    }
+
+    private struct Probe: CustomStringConvertible {
+        var codec: FourCharCode
+        var width: Int
+        var height: Int
+        var fps: Double
+        var dataRate: Double
+        var duration: Double
+        var audioTracks: Int
+        var description: String {
+            "codec \(codec) \(width)×\(height) \(fps) fps \(Int(dataRate)) b/s \(duration)s \(audioTracks) audio"
+        }
+    }
+
+    private static func probe(_ url: URL) async throws -> Probe {
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw VerificationError.failed("\(url.lastPathComponent) has no video track")
+        }
+        let (size, rate, dataRate, descriptions) = try await track.load(
+            .naturalSize, .nominalFrameRate, .estimatedDataRate, .formatDescriptions
+        )
+        guard let description = descriptions.first else {
+            throw VerificationError.failed("\(url.lastPathComponent) has no video format")
+        }
+        return Probe(codec: CMFormatDescriptionGetMediaSubType(description),
+                     width: Int(size.width.rounded()), height: Int(size.height.rounded()),
+                     fps: Double(rate), dataRate: Double(dataRate),
+                     duration: try await asset.load(.duration).seconds,
+                     audioTracks: try await asset.loadTracks(withMediaType: .audio).count)
     }
 
     private static func addAudioTracks(to movie: URL, directory: URL, duration: Double) async throws {
@@ -270,13 +513,13 @@ struct VerifyExport {
     }
 
     private static func makeFixture(url: URL, width: Int, height: Int, duration: Double,
-                                    transform: CGAffineTransform = .identity) async throws {
+                                    transform: CGAffineTransform = .identity, noise: Bool = false) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 2_000_000]
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: noise ? 12_000_000 : 2_000_000]
         ])
         input.transform = transform
         input.expectsMediaDataInRealTime = false
@@ -295,8 +538,14 @@ struct VerifyExport {
         writer.startSession(atSourceTime: .zero)
 
         let frameCount = Int(duration * 30)
+        var noiseGenerator = SystemRandomNumberGenerator()
         for frameIndex in 0..<frameCount {
-            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(2)) }
+            while !input.isReadyForMoreMediaData {
+                guard writer.status == .writing else {
+                    throw writer.error ?? VerificationError.failed("fixture writer stopped")
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
             guard let pool = adaptor.pixelBufferPool else {
                 throw VerificationError.failed("writer did not create a pixel buffer pool")
             }
@@ -305,7 +554,11 @@ struct VerifyExport {
                   let buffer = maybeBuffer else {
                 throw VerificationError.failed("could not allocate fixture frame")
             }
-            paintFixture(buffer, width: width, height: height, frameIndex: frameIndex)
+            if noise {
+                paintNoise(buffer, width: width, height: height, generator: &noiseGenerator)
+            } else {
+                paintFixture(buffer, width: width, height: height, frameIndex: frameIndex)
+            }
             let pts = CMTime(value: Int64(frameIndex), timescale: 30)
             guard adaptor.append(buffer, withPresentationTime: pts) else {
                 throw writer.error ?? VerificationError.failed("writer rejected fixture frame")
@@ -315,6 +568,18 @@ struct VerifyExport {
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw writer.error ?? VerificationError.failed("fixture did not finish")
+        }
+    }
+
+    private static func paintNoise(_ buffer: CVPixelBuffer, width: Int, height: Int,
+                                   generator: inout SystemRandomNumberGenerator) {
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<height {
+            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt64.self)
+            for index in 0..<(width / 2) { row[index] = generator.next() | 0xff00_0000_ff00_0000 }
         }
     }
 
