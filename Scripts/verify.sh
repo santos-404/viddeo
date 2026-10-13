@@ -42,3 +42,9 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Scripts/compare/ClipComparison.swift Scripts/verify-compare.swift -o .build/verify-compare
 .build/verify-compare
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/TimelineModel.swift \
+  Viddeo/Sources/EditHistory.swift Viddeo/Sources/Project.swift Scripts/verify-timeline.swift \
+  -o .build/verify-timeline
+.build/verify-timeline
