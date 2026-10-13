@@ -48,3 +48,8 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/EditHistory.swift Viddeo/Sources/Project.swift Scripts/verify-timeline.swift \
   -o .build/verify-timeline
 .build/verify-timeline
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift Scripts/verify-stage.swift \
+  -o .build/verify-stage
+.build/verify-stage
