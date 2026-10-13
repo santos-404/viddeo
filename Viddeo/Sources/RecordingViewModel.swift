@@ -21,6 +21,8 @@ final class RecordingViewModel {
     var capturesSystemAudio = false
     var capturesMicrophone = false
     var showsClickEffects = true
+    var rendersCursor = true
+    var capturesTypingTiming = false
     var selectedDisplayID: UInt32?
     private(set) var isRefreshing = false
     private(set) var refreshError: String?
@@ -138,9 +140,11 @@ final class RecordingViewModel {
                 let directory = root.appendingPathComponent("Viddeo/Recordings/\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try ZoomConfiguration().save(in: directory)
+                if rendersCursor { try CursorConfiguration().save(in: directory) }
                 try await recorder.start(display: display, directory: directory,
                                          capturesSystemAudio: capturesSystemAudio,
-                                         capturesMicrophone: capturesMicrophone)
+                                         capturesMicrophone: capturesMicrophone,
+                                         rendersCursor: rendersCursor, capturesKeystrokes: rendersCursor && capturesTypingTiming)
                 guard phase == .starting else { return }
                 activeDirectory = directory
                 phase = .recording
@@ -181,6 +185,9 @@ final class RecordingViewModel {
                 }
                 if let presetError { warnings.append(presetError) }
                 if let editorError { warnings.append(editorError) }
+                if completed.keystrokeCaptureAvailable == false {
+                    warnings.append("Typing timing was unavailable or interrupted. Hide-while-typing needs Input Monitoring permission and a new recording.")
+                }
                 operationError = warnings.isEmpty ? nil : warnings.joined(separator: "\n")
             } catch {
                 phase = .idle

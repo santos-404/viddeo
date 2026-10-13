@@ -38,6 +38,17 @@ struct RecordingView: View {
             }
             .disabled(viewModel.isBusy)
 
+            HStack {
+                Toggle("Smooth rendered cursor", isOn: $viewModel.rendersCursor)
+                Toggle("Hide cursor while typing", isOn: $viewModel.capturesTypingTiming)
+                    .disabled(!viewModel.rendersCursor)
+            }
+            .disabled(viewModel.isBusy)
+            if viewModel.rendersCursor && viewModel.capturesTypingTiming {
+                Text("Records key-down times only to hide the cursor while typing.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Toggle("Show click effects in export", isOn: $viewModel.showsClickEffects)
                 .disabled(viewModel.isBusy)
 

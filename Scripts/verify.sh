@@ -20,6 +20,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
+  Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
@@ -88,6 +89,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
+  Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift Viddeo/Sources/EditHistory.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
@@ -95,3 +97,8 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
   Viddeo/Sources/EditorModel.swift Scripts/verify-editor.swift -o .build/verify-editor
 .build/verify-editor
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/CursorRecorder.swift \
+  Scripts/verify-events.swift -o .build/verify-events
+.build/verify-events

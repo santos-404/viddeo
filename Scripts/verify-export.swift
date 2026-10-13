@@ -194,7 +194,46 @@ struct VerifyExport {
         try await verifyGIF(session: session, directory: directory, duration: duration)
         try await verifyEdits(root: directory, width: width, height: height, duration: duration)
 
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load.")
+        try await verifyRenderedCursor(session: session, directory: directory)
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; rendered cursor, typing and segment hiding.")
+    }
+
+    @MainActor
+    private static func verifyRenderedCursor(session: RecordingSession, directory: URL) async throws {
+        var session = session
+        session.cursorEmbedded = false
+        session.events = [CursorEvent(time: 0, x: 0.1, y: 0.1, kind: .move)]
+        session.keystrokes = [KeystrokeEvent(time: 0.5), KeystrokeEvent(time: 0.7), KeystrokeEvent(time: 0.9)]
+        var config = CursorConfiguration()
+        config.size = 96
+        try config.save(in: directory)
+        defer { try? FileManager.default.removeItem(at: directory.appendingPathComponent("cursor-config.json")) }
+        var timeline = TimelineModel(sourceDuration: session.duration)
+        let hidden = try timeline.split(atSource: 4)
+        try timeline.setHideCursor(segmentID: hidden, to: true)
+        let destination = directory.appendingPathComponent("rendered-cursor.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: destination,
+                                          showsClickEffects: false, settings: ExportSettings(fps: 15, height: 720),
+                                          edit: ExportEdit(timeline: timeline))
+        let asset = AVURLAsset(url: destination)
+        for (time, visible) in [(0.2, true), (1.4, false), (3.5, true), (5.0, false)] {
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            let image = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
+            let rep = NSBitmapImageRep(cgImage: image)
+            var white = 0
+            // No fixture grid/crosshair falls in this small region around the cursor.
+            for y in Int(0.1 * Double(rep.pixelsHigh))..<Int(0.16 * Double(rep.pixelsHigh)) {
+                for x in Int(0.1 * Double(rep.pixelsWide))..<Int(0.12 * Double(rep.pixelsWide)) {
+                    if let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                       color.redComponent > 0.8, color.greenComponent > 0.8, color.blueComponent > 0.8 { white += 1 }
+                }
+            }
+            guard visible ? white > 20 : white == 0 else {
+                throw VerificationError.failed("rendered cursor at \(time)s has \(white) white pixels; expected visible=\(visible)")
+            }
+        }
     }
 
     private static func verifyPresets(session: RecordingSession, directory: URL, duration: Double) async throws {
@@ -241,7 +280,7 @@ struct VerifyExport {
                                                destination: againURL, settings: socialSettings)
             throw VerificationError.failed("both-codec export overwrote an existing -h265 destination")
         } catch OfflineExporter.ExportError.outputExists {}
-        let leftovers = try FileManager.default.contentsOfDirectory(atPath: bothDirectory.path).sorted()
+        let leftovers = try await directoryAfterWriterCleanup(bothDirectory).sorted()
         guard leftovers == ["again-h265.mp4", "export-h265.mp4", "export.mp4"],
               try Data(contentsOf: againH265) == Data("keep".utf8) else {
             throw VerificationError.failed("refused both-codec export left \(leftovers)")
@@ -381,8 +420,19 @@ struct VerifyExport {
                 throw VerificationError.failed("GIF export overwrote an existing destination")
             } catch OfflineExporter.ExportError.outputExists {}
         }
-        let partials = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains(".partial.") }
+        let partials = try await directoryAfterWriterCleanup(directory).filter { $0.contains(".partial.") }
         guard partials.isEmpty else { throw VerificationError.failed("temporary exports were left behind: \(partials)") }
+    }
+
+    private static func directoryAfterWriterCleanup(_ directory: URL) async throws -> [String] {
+        // AVAssetWriter can release its .sb- scratch file shortly after finishWriting returns.
+        // Keep asserting all file names, with a bounded wait for that framework-owned cleanup.
+        for _ in 0..<20 {
+            let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            if !names.contains(where: { $0.contains(".sb-") }) { return names }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return try FileManager.default.contentsOfDirectory(atPath: directory.path)
     }
 
     /// Returns the NETSCAPE2.0 application extension loop count, or nil when absent.

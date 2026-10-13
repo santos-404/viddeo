@@ -2,7 +2,7 @@ import CoreGraphics
 import CoreMedia
 import Foundation
 
-/// Records pointer-only events for one display. It never installs a key event tap.
+/// Pointer capture with optional key-down timing; typed text and key identity are never stored.
 @MainActor
 final class CursorRecorder {
     private let storage = CursorEventStorage()
@@ -11,20 +11,25 @@ final class CursorRecorder {
 
     private(set) var isAvailable = false
     private var tapWasAvailableAtStart = false
+    private var capturesKeystrokes = false
+    var keystrokesWereAvailableForSession: Bool { capturesKeystrokes && wasAvailableForSession }
     var wasAvailableForSession: Bool {
         tapWasAvailableAtStart && !storage.isTapDisabled && !storage.didOverflow
     }
 
-    func start(displayID: CGDirectDisplayID) {
+    func start(displayID: CGDirectDisplayID, capturesKeystrokes: Bool = false) {
         stopTap()
-        storage.reset(bounds: CGDisplayBounds(displayID))
+        self.capturesKeystrokes = capturesKeystrokes
+        storage.reset(bounds: CGDisplayBounds(displayID), capturesKeystrokes: capturesKeystrokes,
+                      initialLocation: CGEvent(source: nil)?.location)
         tapWasAvailableAtStart = false
 
-        let eventTypes: [CGEventType] = [
+        var eventTypes: [CGEventType] = [
             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
             .leftMouseDown, .rightMouseDown, .otherMouseDown,
             .leftMouseUp, .rightMouseUp, .otherMouseUp
         ]
+        if capturesKeystrokes { eventTypes.append(.keyDown) }
         let mask = eventTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(storage).toOpaque()
         guard let eventTap = CGEvent.tapCreate(
@@ -67,6 +72,8 @@ final class CursorRecorder {
         storage.events(through: duration)
     }
 
+    func keystrokes(through duration: Double) -> [KeystrokeEvent] { storage.keystrokes(through: duration) }
+
     private func stopTap() {
         if let runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
@@ -89,7 +96,8 @@ final class CursorRecorder {
     }
 }
 
-private final class CursorEventStorage: @unchecked Sendable {
+/// Locked storage, internal so its clock and opt-in contract can be verified without a TCC prompt.
+final class CursorEventStorage: @unchecked Sendable {
     private struct RawEvent {
         let hostSeconds: Double
         let x: Double
@@ -100,15 +108,21 @@ private final class CursorEventStorage: @unchecked Sendable {
     private let lock = NSLock()
     private var bounds = CGRect.zero
     private var rawEvents: [RawEvent] = []
+    private var rawKeys: [Double] = []
+    private var capturesKeystrokes = false
+    private var initialPosition: CGPoint?
     private var anchorHostSeconds: Double?
     private var tapWasDisabled = false
     private var eventsOverflowed = false
     private let maximumEvents = 250_000
 
-    func reset(bounds: CGRect) {
+    func reset(bounds: CGRect, capturesKeystrokes: Bool = false, initialLocation: CGPoint? = nil) {
         lock.lock()
         self.bounds = bounds
         rawEvents.removeAll(keepingCapacity: true)
+        rawKeys.removeAll(keepingCapacity: true)
+        self.capturesKeystrokes = capturesKeystrokes
+        initialPosition = initialLocation.flatMap { bounds.contains($0) ? $0 : nil }
         anchorHostSeconds = nil
         tapWasDisabled = false
         eventsOverflowed = false
@@ -144,9 +158,16 @@ private final class CursorEventStorage: @unchecked Sendable {
     func record(type: CGEventType, location: CGPoint, hostSeconds: Double) {
         lock.lock()
         defer { lock.unlock() }
+        guard hostSeconds.isFinite else { return }
+        if type == .keyDown {
+            guard capturesKeystrokes else { return }
+            guard rawKeys.count < maximumEvents else { eventsOverflowed = true; return }
+            rawKeys.append(hostSeconds)
+            return
+        }
         guard bounds.width > 0, bounds.height > 0,
               bounds.contains(location) else { return }
-        guard rawEvents.count < maximumEvents else {
+        guard rawEvents.count < maximumEvents - 1 else {
             eventsOverflowed = true
             return
         }
@@ -176,10 +197,29 @@ private final class CursorEventStorage: @unchecked Sendable {
         defer { lock.unlock() }
         guard let anchorHostSeconds else { return [] }
 
-        return rawEvents.compactMap { event in
+        var result = rawEvents.compactMap { event -> CursorEvent? in
             let time = event.hostSeconds - anchorHostSeconds
             guard time >= 0, time <= duration else { return nil }
             return CursorEvent(time: time, x: event.x, y: event.y, kind: event.kind)
+        }
+        // A stationary cursor still needs a position at the first frame. Use the last
+        // pre-epoch event, or the position sampled at tap installation.
+        if let prior = rawEvents.last(where: { $0.hostSeconds <= anchorHostSeconds }) {
+            if result.first?.time != 0 { result.insert(CursorEvent(time: 0, x: prior.x, y: prior.y, kind: .move), at: 0) }
+        } else if let position = initialPosition, bounds.width > 0, bounds.height > 0, duration >= 0 {
+            result.insert(CursorEvent(time: 0, x: (position.x - bounds.minX) / bounds.width,
+                                      y: (position.y - bounds.minY) / bounds.height, kind: .move), at: 0)
+        }
+        return result
+    }
+
+    func keystrokes(through duration: Double) -> [KeystrokeEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard capturesKeystrokes, let anchorHostSeconds else { return [] }
+        return rawKeys.compactMap { host in
+            let time = host - anchorHostSeconds
+            return time >= 0 && time <= duration ? KeystrokeEvent(time: time) : nil
         }
     }
 }

@@ -43,8 +43,11 @@ final class ScreenRecorder {
     private var isStopping = false
     private var pendingCaptureFailure: Error?
     private var audioOptions = (system: false, microphone: false)
+    private var cursorEmbedded = true
+    private var capturesTyping = false
 
-    func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false) async throws {
+    func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false,
+               rendersCursor: Bool = false, capturesKeystrokes: Bool = false) async throws {
         guard stream == nil, !isStarting, !isStopping else { throw RecorderError.alreadyRecording }
         let dimensions = try Self.captureDimensions(displayID: display.displayID)
         isStarting = true
@@ -85,7 +88,10 @@ final class ScreenRecorder {
                 configuration.sampleRate = 48_000
                 configuration.channelCount = 2
             }
-            configuration.showsCursor = true
+            cursorRecorder.start(displayID: display.displayID, capturesKeystrokes: capturesKeystrokes)
+            cursorEmbedded = !rendersCursor || !cursorRecorder.isAvailable
+            capturesTyping = capturesKeystrokes
+            configuration.showsCursor = cursorEmbedded
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -116,7 +122,6 @@ final class ScreenRecorder {
             self.createdAt = Date()
             self.audioOptions = (capturesSystemAudio, capturesMicrophone)
 
-            cursorRecorder.start(displayID: display.displayID)
             try await stream.startCapture()
             guard currentGeneration == startGeneration, self.pipeline === pipeline else {
                 throw RecorderError.streamFailure("Capture stopped while startup was completing.")
@@ -160,7 +165,10 @@ final class ScreenRecorder {
                 events: events,
                 droppedFrames: finished.droppedFrames,
                 eventCaptureAvailable: cursorRecorder.wasAvailableForSession,
-                audio: audioOptions.system || audioOptions.microphone ? finished.audio : nil
+                audio: audioOptions.system || audioOptions.microphone ? finished.audio : nil,
+                cursorEmbedded: cursorEmbedded,
+                keystrokes: capturesTyping ? cursorRecorder.keystrokes(through: duration) : nil,
+                keystrokeCaptureAvailable: capturesTyping ? cursorRecorder.keystrokesWereAvailableForSession : nil
             )
             clearSession(generation: stopGeneration)
             try session.save(in: directory)

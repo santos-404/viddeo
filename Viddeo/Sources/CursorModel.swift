@@ -1,12 +1,5 @@
 import Foundation
 
-/// A key press timestamp. Key identity and typed text are never recorded.
-struct KeystrokeEvent: Codable, Sendable, Equatable {
-    enum Kind: String, Codable, Sendable { case keyDown }
-    var time: Double
-    var kind: Kind = .keyDown
-}
-
 enum CursorRotationMode: String, Codable, Sendable {
     case velocity, directional
 }

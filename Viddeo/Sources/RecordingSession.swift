@@ -10,6 +10,13 @@ struct CursorEvent: Codable, Sendable, Equatable {
     var kind: Kind
 }
 
+/// Only timing is retained, never key codes or text. Capture is opt-in.
+struct KeystrokeEvent: Codable, Sendable, Equatable {
+    enum Kind: String, Codable, Sendable { case keyDown }
+    var time: Double
+    var kind: Kind = .keyDown
+}
+
 struct RecordingSession: Codable, Sendable {
     var version = 1
     var id: UUID
@@ -23,6 +30,10 @@ struct RecordingSession: Codable, Sendable {
     var droppedFrames: Int
     var eventCaptureAvailable: Bool
     var audio: AudioCaptureMetadata? = nil
+    /// Missing on legacy sessions means the system cursor is embedded in raw video.
+    var cursorEmbedded: Bool? = nil
+    var keystrokes: [KeystrokeEvent]? = nil
+    var keystrokeCaptureAvailable: Bool? = nil
 
     func save(in directory: URL) throws {
         let encoder = JSONEncoder()

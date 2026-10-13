@@ -51,7 +51,7 @@ final class OfflineExporter {
         }
         guard (2...8192).contains(session.width), (2...8192).contains(session.height),
               session.duration.isFinite, session.duration > 0, session.duration <= 12 * 60 * 60,
-              session.events.count <= 250_000 else {
+              session.events.count <= 250_000, (session.keystrokes?.count ?? 0) <= 250_000 else {
             throw ExportError.invalidSession("dimensions, duration, or event count exceed supported bounds")
         }
         let filename = session.videoFilename
@@ -136,6 +136,7 @@ final class OfflineExporter {
             }
         }
         let outputSize = CGSize(width: size.width, height: size.height)
+        let cursorConfiguration = session.cursorEmbedded == false ? try CursorConfiguration.load(in: directory) : nil
         let renderer = ExportFrameRenderer(
             sourceWidth: session.width, sourceHeight: session.height,
             outputWidth: size.width, outputHeight: size.height,
@@ -144,7 +145,14 @@ final class OfflineExporter {
             edit: edit?.timeline,
             stage: try edit?.stage.map { try StageRenderer(style: $0, outputSize: outputSize, baseDirectory: sessionDirectory) },
             captions: edit?.captions.map { CaptionRenderer(track: $0.track, configuration: $0.configuration, outputSize: outputSize) },
-            sourceDuration: actualDuration
+            sourceDuration: actualDuration,
+            cursorTimeline: cursorConfiguration.map {
+                CursorTimeline(events: session.events, keystrokes: session.keystrokes ?? [], duration: session.duration,
+                               configuration: $0, sourceWidth: Double(session.width), sourceHeight: Double(session.height))
+            },
+            cursorRenderer: cursorConfiguration.map {
+                CursorRenderer(configuration: $0, outputSize: CGSize(width: session.width, height: session.height))
+            }
         )
         // The output runs in playback time; without a timeline that is the recording itself.
         let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
@@ -358,6 +366,8 @@ struct ExportFrameRenderer: Sendable {
     var captions: CaptionRenderer? = nil
     /// Mapped source times are clamped below this (the decodable media's end).
     var sourceDuration: Double = .infinity
+    var cursorTimeline: CursorTimeline? = nil
+    var cursorRenderer: CursorRenderer? = nil
 
     /// Identity without a timeline, so the unedited export samples exactly as before.
     func sourceTime(forPlaybackTime time: Double) -> Double {
@@ -394,7 +404,12 @@ struct ExportFrameRenderer: Sendable {
         )
         // Click locations are in the original top-left source coordinate
         // space, so render them before applying the zoom transform.
-        let image = clickTimeline?.image(over: normalizedSource, at: time) ?? normalizedSource
+        var image = clickTimeline?.image(over: normalizedSource, at: time) ?? normalizedSource
+        let hideCursor = edit?.segments.first { $0.sourceStart <= time && time < $0.sourceEnd }?.hideCursor ?? false
+        if !hideCursor, let cursorTimeline, let cursorRenderer,
+           let cursor = cursorRenderer.image(for: cursorTimeline.state(at: time)) {
+            image = cursor.composited(over: image)
+        }
         let scale = frame.scale.isFinite ? max(1, frame.scale) : 1
         let cropWidth = width / CGFloat(scale)
         let cropHeight = height / CGFloat(scale)

@@ -77,6 +77,7 @@ struct EditorView: View {
                     Toggle("Hide rendered cursor", isOn: Binding(get: { segment.hideCursor }, set: { hidden in
                         editor.edit { try $0.timeline.setHideCursor(segmentID: segment.id, to: hidden) }
                     }))
+                    .disabled(editor.session.cursorEmbedded != false)
                 }
                 volume("Microphone", value: segment.volume, id: segment.id, system: false)
                 volume("System audio", value: segment.systemVolume, id: segment.id, system: true)
