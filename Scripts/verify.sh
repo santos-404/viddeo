@@ -53,3 +53,9 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift Scripts/verify-stage.swift \
   -o .build/verify-stage
 .build/verify-stage
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Captions.swift \
+  Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \
+  Scripts/verify-captions.swift -o .build/verify-captions
+.build/verify-captions

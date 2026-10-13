@@ -24,6 +24,8 @@
     <string>Viddeo can include your camera in a screen recording.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Viddeo can record microphone audio with your screen recording.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Viddeo transcribes your microphone audio on this Mac to create captions.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
