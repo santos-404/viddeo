@@ -11,7 +11,9 @@ completed-session loading and export. It serializes user actions, retains a
 previous completed session on capture failure, and surfaces permission errors.
 
 `ScreenRecorder` owns SCStream lifecycle. A serial sample queue confines writer
-state. Complete screen frames feed AVAssetWriter H.264. Stream/writer failures
+state. Complete screen frames feed AVAssetWriter H.264; optional ScreenCaptureKit system
+audio/microphone outputs feed separate AAC writer inputs on the same queue.
+First accepted video PTS establishes their common movie epoch. Stream/writer failures
 converge on cleanup. First capture is capped to even dimensions within 3840×2160.
 
 `CursorRecorder` owns a pointer-only listen-only CGEvent tap. Locked storage maps
@@ -26,8 +28,12 @@ spatial groups and physical transitions once, then supplies immutable frame
 lookup for concurrent composition callbacks and arbitrary seeks.
 
 `OfflineExporter` validates media metadata, loads zoom configuration, applies
-Core Image crop/scale through AVVideoComposition, and writes MP4 with
+Core Image click overlays then crop/scale through AVVideoComposition, and writes MP4 with
 AVAssetExportSession. Failed export output is removed.
+
+`ClickEffectTimeline` filters and sorts pointer-down events, bounds active events
+by binary search, and supplies deterministic source-space rings during export.
+It does not depend on recording state; overlays follow the same crop as raw video.
 
 ## Module layout
 
