@@ -23,7 +23,11 @@ For pointer tracking, allow Viddeo under **Input Monitoring**. A missing or
 interrupted event tap is reported in the UI and session metadata. Raw capture can
 still succeed; record again after granting permission to get automatic zooms.
 
-Choose a display → Start → click around → Stop → Export. Capture stores raw H.264
+Choose a display and optionally enable System Audio and Microphone → Start →
+click around → Stop → Export. Microphone requests macOS permission when enabled;
+if denied, grant it in Privacy & Security → Microphone or turn the option off.
+Export shows expanding click rings by default; turn off Show click effects in
+export for plain cursor video. Raw recordings are unchanged by that export option. Capture stores raw H.264
 video and pointer JSON in `~/Library/Application Support/Viddeo/Recordings/<UUID>/`.
 Use Show Recording to find it, or Load Session to reopen its `session.json`.
 Exports use a chosen MP4 path and refuse to replace existing files.
@@ -43,6 +47,9 @@ Synthetic verifiers cover zoom timing/grouping/seek stability, crop bounds,
 H.264 writer output, idle-screen held-frame duration, dropped/nonmonotonic frame
 handling, no-frame failure, session JSON roundtrip, measured 2× marker growth,
 export dimensions/duration/filled edges and invalid-input/overwrite handling.
+M3 checks cover two separate AAC tracks, preserved delayed source timing, legacy
+session decoding, click fade/position/seeks and rendered zoom alignment. The export
+fixture decodes both tracks to check that distinct 440/880 Hz tones survive.
 Temporary media is removed on completion. The macOS 27 SDK warns that some
 AVAssetWriter APIs are deprecated; those APIs remain available at the macOS 26
 deployment target and the app builds successfully.
@@ -60,11 +67,18 @@ permissions and a second capture after stop. Original comparison clips are pendi
 ## Current scope
 
 Implemented: native display capture, pointer sidecar, session loading, configurable
-offline automatic zoom and H.264 export. M1/M2 core runtime path is verified;
+offline automatic zoom, click rings, optional microphone/system AAC capture and
+H.264 export with audio. M1/M2 core runtime path is verified;
 remaining fidelity and edge-case acceptance is recorded above.
-Audio/click effects (M3), presets/comparison (M4), and the expanded timeline,
-on-device captions, backgrounds/frames, keyboard/cursor effects, speed/silence,
-webcam and voice cleanup are not implemented yet. They remain in scope.
+M3 is partial until live dual-source sync and reference comparison pass. To check it,
+enable both audio options, play a short sound while speaking/clicking, then stop
+and export. Compare audio timing with the raw recording and inspect both tracks;
+exports retain separate sources, with audio mixing/editing planned as a follow-up.
+Test microphone denial and a second capture after granting access.
+
+Presets/comparison (M4), the timeline, on-device captions, backgrounds/frames,
+keyboard/cursor refinement, speed/silence, webcam and voice cleanup remain in scope.
+Click sounds and ripple distortion also remain follow-ups.
 
 See [plan](docs/plan.md), [spec](docs/spec.md), [architecture](docs/architecture.md),
 [research ledger](docs/research/ledger.md) and [auto-zoom findings](docs/research/auto-zoom.md).
