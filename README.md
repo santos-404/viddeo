@@ -26,8 +26,11 @@ still succeed; record again after granting permission to get automatic zooms.
 Choose a display and optionally enable System Audio and Microphone → Start →
 click around → Stop → Export. Microphone requests macOS permission when enabled;
 if denied, grant it in Privacy & Security → Microphone or turn the option off.
-Export shows expanding click rings by default; turn off Show click effects in
-export for plain cursor video. Raw recordings are unchanged by that export option. Capture stores raw H.264
+Export shows a click disc (observed Screen Studio circle effect: width-relative growth, rim, fade)
+by default; turn off Show click effects in export for plain cursor video. Tune it in the
+`click-config.json` beside a session. Raw recordings are unchanged by that export option.
+Pick an export preset (H.264, HEVC, both, or GIF; quality tiers, 720p–4K, aspect ratios) before
+Export; custom presets load from `export-presets.json` in the session folder. Capture stores raw H.264
 video and pointer JSON in `~/Library/Application Support/Viddeo/Recordings/<UUID>/`.
 Use Show Recording to find it, or Load Session to reopen its `session.json`.
 Exports use a chosen MP4 path and refuse to replace existing files.
@@ -76,11 +79,18 @@ and export. Compare audio timing with the raw recording and inspect both tracks;
 exports retain separate sources, with audio mixing/editing planned as a follow-up.
 Test microphone denial and a second capture after granting access.
 
-Presets/comparison (M4), the timeline, on-device captions, backgrounds/frames,
+The timeline editor UI, on-device captions, backgrounds/frames,
 keyboard/cursor refinement, speed/silence, webcam and voice cleanup remain in scope.
 Click sounds and ripple distortion also remain follow-ups.
 
-See [plan](docs/plan.md), [spec](docs/spec.md), [architecture](docs/architecture.md),
+M4 (export presets, GIF, side-by-side comparison tool) is implemented and verified
+synthetically; original-versus-viddeo comparison clips need a live recording of Screen Studio
+and are tracked in [live acceptance](docs/live-acceptance.md). Compare any two clips with
+`./Scripts/compare-clips.sh left.mp4 right.mp4 out.mp4 --left-label Original --right-label Viddeo`.
+`build.sh` also keeps the Xcode project's source list in sync with `Viddeo/Sources/*.swift`
+(`Scripts/sync-sources.js`).
+
+See [live acceptance](docs/live-acceptance.md), [plan](docs/plan.md), [spec](docs/spec.md), [architecture](docs/architecture.md),
 [research ledger](docs/research/ledger.md) and [auto-zoom findings](docs/research/auto-zoom.md).
 Reference findings distinguish shipped static observations, manual interpretation,
 independent design choices and unresolved behavior. Research artifacts are kept
