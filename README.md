@@ -37,8 +37,29 @@ Exports use a chosen MP4 path and refuse to replace existing files.
 
 Tune the generated `zoom-config.json` beside a session, then export again. Defaults
 are 2× zoom, 300 ms before /2500 ms after click, 2500 ms merge gap, and a physical
-spring. Raw video is preserved for future editing. The captured cursor is currently
-embedded in raw video; separate smooth cursor rendering comes later.
+spring. Raw video is preserved for future editing. New recordings default to a
+smooth cursor drawn during export. Turn off Smooth rendered cursor to embed the
+system cursor instead. Existing sessions keep their embedded cursor. If pointer
+monitoring cannot start, capture falls back to the system cursor. Hide cursor while
+typing is opt-in and records key-down timestamps only, never keys or text.
+Tune the procedural arrow in `cursor-config.json`; shake removal, motion blur,
+app-specific cursor shapes and shortcut overlays remain follow-ups.
+
+After Stop or Load Session, use the editor's Timeline, Background and Captions tabs.
+Trim/split/delete/reorder segments, choose speed and separate microphone/system gains,
+or analyze microphone silence and apply Trim Silence / Speed Silence 4×.
+Source ranges use recording seconds; the playback duration updates with edits.
+Undo/Redo covers timeline, stage and captions. Generate on Device requires recorded
+microphone audio; Apple may download a supported language model. Review and correct
+the generated cue text before saving. Enable Background and padding to add a gradient,
+padding and rounded corners. Export uses the current edits, including unsaved changes.
+There is no processed playback preview yet; review exported files.
+
+Save Project writes `project.json`, `stage-config.json`, `captions.json` and
+`captions-config.json` beside the session. Edits are also saved before starting another
+recording, loading a different session or quitting. A failed save leaves the editor
+dirty and blocks switching/quitting. Sidecars are individually atomic, not one
+multi-file transaction. Turning the stage off preserves its saved style.
 
 ## Verification
 
@@ -76,12 +97,16 @@ remaining fidelity and edge-case acceptance is recorded above.
 M3 is partial until live dual-source sync and reference comparison pass. To check it,
 enable both audio options, play a short sound while speaking/clicking, then stop
 and export. Compare audio timing with the raw recording and inspect both tracks;
-exports retain separate sources, with audio mixing/editing planned as a follow-up.
+exports retain separate sources, including per-segment gain edits.
 Test microphone denial and a second capture after granting access.
 
-The timeline editor UI, on-device captions, backgrounds/frames,
-keyboard/cursor refinement, speed/silence, webcam and voice cleanup remain in scope.
-Click sounds and ripple distortion also remain follow-ups.
+The basic timeline editor, on-device caption provider, background renderer,
+speed/silence actions and rendered cursor are implemented. Speech model availability,
+transcription quality and the new capture controls need live acceptance.
+Webcam capture/overlay and voice-cleanup/mixing/click-sound modules have standalone
+verifiers but are not yet wired into the app/export path. Device mockups, shortcut
+overlays, continuous speed ramps, processed preview and ripple distortion remain
+follow-ups. All of these areas remain in scope.
 
 M4 (export presets, GIF, side-by-side comparison tool) is implemented and verified
 synthetically; original-versus-viddeo comparison clips need a live recording of Screen Studio

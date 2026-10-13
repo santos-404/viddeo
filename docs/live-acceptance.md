@@ -32,3 +32,24 @@ Things only a person with the real hardware/permissions can verify. Synthetic ve
 - [ ] Captions: first run installs the Speech model for the locale (needs network once) and
       prompts for speech permission if required; check caption timing against the audio.
 - [ ] Webcam: camera permission, device switching, sync with screen.
+
+## Expanded editor / capture checklist — 2026-10-14
+
+- [ ] Stop/load a session; split, trim, reorder, change speed/gains, undo/redo, save,
+  reopen and compare the edited MP4/GIF. Confirm unsaved changes affect export.
+- [ ] Enable a gradient/padding/radius and captions; compare the exported result at
+  both widescreen and portrait presets. Processed preview is not yet implemented.
+- [ ] Record microphone speech, generate on-device captions in a supported locale,
+  correct text, regenerate, undo and save/reload; confirm cue timing and quality.
+- [ ] Analyze microphone silence, apply trim/4× speed, inspect boundaries and export sync.
+- [ ] Record with Smooth rendered cursor on, move/click in every display corner and
+  remain still at start. Verify cursor placement, smoothing/press scale and zoom alignment.
+- [ ] Opt into Hide cursor while typing; type at least three keys within 1.8 seconds,
+  then move the pointer. Verify hide/reveal and timing-only session metadata.
+- [ ] Deny Input Monitoring; confirm capture uses an embedded cursor when the tap cannot
+  start. Interrupt monitoring after capture begins and inspect the reported warning.
+- [ ] Open a legacy session and confirm its embedded cursor is not drawn a second time.
+- [ ] Check quit/session switching saves edits; a failed save must keep the current editor.
+
+Camera and DSP audio integration remain pending; the existing camera/audio checklist
+above is for their standalone modules and subsequent live integration acceptance.
