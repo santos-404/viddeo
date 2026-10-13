@@ -39,9 +39,12 @@ final class OfflineExporter {
     }
 
     /// Writes the export and returns every file it created (two for the `both` codec setting).
+    /// `edit` adds the timeline (output runs in playback time), stage and captions; nil, or an
+    /// empty edit, renders exactly the unedited export.
     @discardableResult
     func export(session: RecordingSession, directory: URL, destination: URL,
                 showsClickEffects: Bool = true, settings: ExportSettings = .mp4Default,
+                edit: ExportEdit? = nil,
                 progress: (@Sendable (Double) -> Void)? = nil) async throws -> [URL] {
         guard session.version == 1 else {
             throw ExportError.invalidSession("unsupported session version \(session.version)")
@@ -124,22 +127,39 @@ final class OfflineExporter {
             ? ClickEffectTimeline(events: session.events, duration: session.duration,
                                   configuration: try ClickEffectConfiguration.load(in: directory)) : nil
         let size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+        if let timeline = edit?.timeline {
+            do { try timeline.validate() } catch {
+                throw ExportError.invalidSession("the timeline is invalid: \(error.localizedDescription)")
+            }
+            guard abs(timeline.sourceDuration - session.duration) <= TimelineModel.minSegmentDuration else {
+                throw ExportError.invalidSession("the timeline does not match the recording's duration")
+            }
+        }
+        let outputSize = CGSize(width: size.width, height: size.height)
         let renderer = ExportFrameRenderer(
             sourceWidth: session.width, sourceHeight: session.height,
             outputWidth: size.width, outputHeight: size.height,
             timeline: ZoomTimeline(session: session, configuration: zoomConfiguration),
-            clickTimeline: clickTimeline
+            clickTimeline: clickTimeline,
+            edit: edit?.timeline,
+            stage: try edit?.stage.map { try StageRenderer(style: $0, outputSize: outputSize, baseDirectory: sessionDirectory) },
+            captions: edit?.captions.map { CaptionRenderer(track: $0.track, configuration: $0.configuration, outputSize: outputSize) },
+            sourceDuration: actualDuration
         )
-        let frameCount = ExportFrameRenderer.frameCount(duration: actualDuration, fps: settings.fps)
+        // The output runs in playback time; without a timeline that is the recording itself.
+        let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
+        let frameCount = ExportFrameRenderer.frameCount(duration: outputDuration.seconds, fps: settings.fps)
 
         if settings.format == .gif {
             guard frameCount <= GifExporter.maximumFrames else {
                 throw ExportError.tooManyGIFFrames(count: frameCount, limit: GifExporter.maximumFrames)
             }
             try await GifExporter.write(source: sourceURL, destination: outputURL, renderer: renderer,
-                                        duration: actualDuration, settings: settings, progress: progress)
+                                        duration: outputDuration.seconds, settings: settings, progress: progress)
             return [outputURL]
         }
+        let audioRoles = edit?.timeline == nil ? nil
+            : try await ExportAudioTrack.roles(of: asset.loadTracks(withMediaType: .audio), session: session)
 
         // Render every codec to a hidden sibling first, then move all of them into place, so
         // a failure or cancellation never leaves one finished file of a requested pair.
@@ -153,7 +173,8 @@ final class OfflineExporter {
                 let share = 1 / Double(outputs.count)
                 try await Self.writeMovie(
                     source: sourceURL, destination: temporaryURL, codec: output.codec,
-                    renderer: renderer, duration: duration, settings: settings,
+                    renderer: renderer, duration: outputDuration, sourceDuration: duration,
+                    audioRoles: audioRoles, settings: settings,
                     progress: progress.map { report in
                         { @Sendable value in report((Double(index) + value) * share) }
                     }
@@ -174,14 +195,16 @@ final class OfflineExporter {
     }
 
     /// Decodes each source audio track to PCM and re-encodes it as its own AAC track, so
-    /// system audio and microphone stay separate in the export.
+    /// system audio and microphone stay separate in the export. `duration` is the output
+    /// (playback) duration; `audioRoles` is non-nil exactly when the renderer has a timeline.
     private nonisolated static func writeMovie(
         source: URL, destination: URL, codec: ExportCodec, renderer: ExportFrameRenderer,
-        duration: CMTime, settings: ExportSettings, progress: (@Sendable (Double) -> Void)?
+        duration: CMTime, sourceDuration: CMTime, audioRoles: [ExportAudioTrack.Role]?,
+        settings: ExportSettings, progress: (@Sendable (Double) -> Void)?
     ) async throws {
         let asset = AVURLAsset(url: source)
-        let timeRange = CMTimeRange(start: .zero, duration: duration)
-        let frames = try await SourceFrameReader(asset: asset, timeRange: timeRange)
+        let timeRange = CMTimeRange(start: .zero, duration: sourceDuration)
+        let frames = try await ExportFrameSource(asset: asset, duration: sourceDuration, timeline: renderer.edit)
         let writer = try AVAssetWriter(outputURL: destination, fileType: .mp4)
         writer.shouldOptimizeForNetworkUse = true
 
@@ -221,44 +244,20 @@ final class OfflineExporter {
         guard writer.canAdd(videoInput) else { throw ExportError.unsupportedOutput("cannot add a video track") }
         writer.add(videoInput)
 
-        var audio: [(reader: AVAssetReader, output: AVAssetReaderTrackOutput, input: AVAssetWriterInput)] = []
-        for track in try await asset.loadTracks(withMediaType: .audio) {
-            let descriptions = try await track.load(.formatDescriptions)
-            let format = descriptions.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
-            let sourceRate = format?.mSampleRate ?? 48_000
-            let sampleRate = [48_000.0, 44_100, 32_000, 24_000, 22_050, 16_000].contains(sourceRate) ? sourceRate : 48_000
-            let channels = min(2, max(1, Int(format?.mChannelsPerFrame ?? 2)))
-            let reader = try AVAssetReader(asset: asset)
-            reader.timeRange = timeRange
-            let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ])
-            output.alwaysCopiesSampleData = false
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
-                AVEncoderBitRateKey: 64_000 * channels
-            ]
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            input.expectsMediaDataInRealTime = false
-            guard reader.canAdd(output), writer.canAdd(input) else {
-                throw ExportError.unsupportedOutput("cannot transcode audio track \(track.trackID)")
+        var audio: [ExportAudioTrack] = []
+        for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
+            if let timeline = renderer.edit {
+                let role = audioRoles.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? .unknown
+                audio.append(try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
+                                                        playbackDuration: duration.seconds, writer: writer))
+            } else {
+                audio.append(try await ExportAudioTrack(asset: asset, track: track, timeRange: timeRange, writer: writer))
             }
-            reader.add(output)
-            writer.add(input)
-            audio.append((reader, output, input))
         }
 
         func cancelAll() {
             frames.cancel()
-            for track in audio { track.reader.cancelReading() }
+            for track in audio { track.cancel() }
             writer.cancelWriting()
         }
 
@@ -266,9 +265,7 @@ final class OfflineExporter {
             guard writer.startWriting() else {
                 throw ExportError.encodingFailed(writer.error?.localizedDescription ?? "the writer did not start")
             }
-            for track in audio where !track.reader.startReading() {
-                throw ExportError.encodingFailed(track.reader.error?.localizedDescription ?? "audio reading did not start")
-            }
+            for track in audio { try track.start() }
             writer.startSession(atSourceTime: .zero)
 
             let context = CIContext()
@@ -285,7 +282,8 @@ final class OfflineExporter {
                 var progressed = false
                 if frameIndex < frameCount, videoInput.isReadyForMoreMediaData {
                     let time = CMTime(value: Int64(frameIndex), timescale: CMTimeScale(settings.fps))
-                    guard let sourceImage = try frames.image(at: time.seconds) else {
+                    let sourceTime = renderer.sourceTime(forPlaybackTime: time.seconds)
+                    guard let sourceImage = try frames.image(atSource: sourceTime) else {
                         throw ExportError.encodingFailed("the raw recording has no decodable frames")
                     }
                     guard let pool = adaptor.pixelBufferPool else {
@@ -296,7 +294,7 @@ final class OfflineExporter {
                           let buffer = maybeBuffer else {
                         throw ExportError.encodingFailed("could not allocate an output frame")
                     }
-                    context.render(renderer.image(source: sourceImage, at: time.seconds), to: buffer,
+                    context.render(renderer.image(source: sourceImage, at: sourceTime), to: buffer,
                                    bounds: renderer.outputRect, colorSpace: colorSpace)
                     guard adaptor.append(buffer, withPresentationTime: time) else {
                         throw ExportError.encodingFailed(writer.error?.localizedDescription ?? "a video frame was rejected")
@@ -313,10 +311,7 @@ final class OfflineExporter {
                 for (index, track) in audio.enumerated() where !audioFinished[index] {
                     var appended = 0
                     while appended < 16, track.input.isReadyForMoreMediaData {
-                        guard let sample = track.output.copyNextSampleBuffer() else {
-                            if track.reader.status == .failed {
-                                throw ExportError.encodingFailed(track.reader.error?.localizedDescription ?? "audio decoding failed")
-                            }
+                        guard let sample = try track.nextSampleBuffer() else {
                             track.input.markAsFinished()
                             audioFinished[index] = true
                             break
@@ -344,9 +339,13 @@ final class OfflineExporter {
 }
 
 /// Composes one export frame. The zoom crop and click rings are computed in source pixel
-/// space; the result is then fitted into the output canvas. When the output aspect differs
-/// from the source, the remainder is solid black — a placeholder until the Phase-5 stage
-/// (padding/background) exists.
+/// space; the result is then fitted into the output canvas. Without a stage, any remainder of
+/// a different output aspect is solid black; with a stage, the zoomed content fills the stage
+/// rect and the stage (background, padding, radius, shadow) fills the whole canvas. Captions
+/// are drawn last, over the full canvas.
+///
+/// `image(source:at:)` takes SOURCE time: zoom, clicks and caption cues are all stored in
+/// raw-recording time. Callers map each output (playback) time through `sourceTime(forPlaybackTime:)`.
 struct ExportFrameRenderer: Sendable {
     let sourceWidth: Int
     let sourceHeight: Int
@@ -354,6 +353,17 @@ struct ExportFrameRenderer: Sendable {
     let outputHeight: Int
     let timeline: ZoomTimeline
     let clickTimeline: ClickEffectTimeline?
+    var edit: TimelineModel? = nil
+    var stage: StageRenderer? = nil
+    var captions: CaptionRenderer? = nil
+    /// Mapped source times are clamped below this (the decodable media's end).
+    var sourceDuration: Double = .infinity
+
+    /// Identity without a timeline, so the unedited export samples exactly as before.
+    func sourceTime(forPlaybackTime time: Double) -> Double {
+        guard let edit else { return time }
+        return min(edit.sourceTime(forPlaybackTime: time), sourceDuration)
+    }
 
     var outputRect: CGRect { CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight) }
 
@@ -400,6 +410,22 @@ struct ExportFrameRenderer: Sendable {
             height: cropHeight
         )
 
+        if let stage {
+            // The crop is resampled once, straight into the stage rect's pixel size (its aspect
+            // matches the source up to rounding), then placed by the stage.
+            let size = stage.stageRect(contentAspect: Double(sourceWidth) / Double(sourceHeight)).size
+            let scaleX = size.width / crop.width, scaleY = size.height / crop.height
+            let cropped = image.cropped(to: crop).clampedToExtent()
+                .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+            let resized = scaleY < 1
+                ? cropped.applyingFilter("CILanczosScaleTransform", parameters: [
+                    kCIInputScaleKey: scaleY, kCIInputAspectRatioKey: scaleX / scaleY
+                ])
+                : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            let staged = stage.compose(resized.cropped(to: CGRect(origin: .zero, size: size)))
+            return withCaptions(staged, at: time).cropped(to: outputRect)
+        }
+
         // One resample maps the crop straight into the fitted content rectangle.
         let content = contentRect
         let total = content.width / crop.width
@@ -414,7 +440,13 @@ struct ExportFrameRenderer: Sendable {
             .transformed(by: CGAffineTransform(translationX: content.minX, y: content.minY))
             .cropped(to: content)
         let background = CIImage(color: .black).cropped(to: outputRect)
-        return placed.composited(over: background).cropped(to: outputRect)
+        return withCaptions(placed.composited(over: background), at: time).cropped(to: outputRect)
+    }
+
+    /// Caption cues are source-time milliseconds, like zoom and click data.
+    private func withCaptions(_ frame: CIImage, at sourceTime: Double) -> CIImage {
+        guard let overlay = captions?.image(at: sourceTime * 1000) else { return frame }
+        return overlay.composited(over: frame)
     }
 }
 
@@ -427,10 +459,14 @@ final class SourceFrameReader {
     private var next: (time: Double, image: CIImage)?
     private var exhausted = false
 
-    init(asset: AVAsset, timeRange: CMTimeRange) async throws {
+    convenience init(asset: AVAsset, timeRange: CMTimeRange) async throws {
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw OfflineExporter.ExportError.missingVideoTrack
         }
+        try self.init(asset: asset, track: track, timeRange: timeRange)
+    }
+
+    init(asset: AVAsset, track: AVAssetTrack, timeRange: CMTimeRange) throws {
         reader = try AVAssetReader(asset: asset)
         reader.timeRange = timeRange
         output = AVAssetReaderTrackOutput(track: track, outputSettings: [
@@ -455,6 +491,12 @@ final class SourceFrameReader {
             next = try readFrame()
         }
         return current?.image
+    }
+
+    /// Presentation time of the first decodable frame, without consuming it.
+    func firstFrameTime() throws -> Double? {
+        if current == nil { current = try readFrame() }
+        return current?.time
     }
 
     func cancel() {

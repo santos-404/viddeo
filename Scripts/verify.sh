@@ -20,7 +20,10 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
-  Viddeo/Sources/OfflineExporter.swift Scripts/verify-export.swift \
+  Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift \
+  Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
+  Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
+  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Scripts/verify-export.swift \
   -o .build/verify-export
 .build/verify-export
 
@@ -59,3 +62,25 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \
   Scripts/verify-captions.swift -o .build/verify-captions
 .build/verify-captions
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/TimelineModel.swift \
+  Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
+  Scripts/verify-silence.swift -o .build/verify-silence
+.build/verify-silence
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/WebcamOverlay.swift \
+  Viddeo/Sources/WebcamRecorder.swift Scripts/verify-webcam.swift -o .build/verify-webcam
+.build/verify-webcam
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/AudioProcessing.swift \
+  Viddeo/Sources/ClickSounds.swift Scripts/verify-audio-processing.swift \
+  -o .build/verify-audio-processing
+.build/verify-audio-processing
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/CursorModel.swift \
+  Viddeo/Sources/CursorRenderer.swift Scripts/verify-cursor.swift -o .build/verify-cursor
+.build/verify-cursor

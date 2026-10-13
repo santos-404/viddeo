@@ -192,8 +192,9 @@ struct VerifyExport {
 
         try await verifyPresets(session: session, directory: directory, duration: duration)
         try await verifyGIF(session: session, directory: directory, duration: duration)
+        try await verifyEdits(root: directory, width: width, height: height, duration: duration)
 
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges.")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load.")
     }
 
     private static func verifyPresets(session: RecordingSession, directory: URL, duration: Double) async throws {
@@ -428,9 +429,12 @@ struct VerifyExport {
         let highURL = directory.appendingPathComponent("tone-880.wav")
         try writeToneWAV(to: lowURL, frequency: 440, duration: duration)
         try writeToneWAV(to: highURL, frequency: 880, duration: duration)
+        try await muxAudio(into: movie, directory: directory, tones: [lowURL, highURL], duration: duration)
+    }
+
+    /// Replaces `movie` with its video plus one audio track per WAV, in order.
+    private static func muxAudio(into movie: URL, directory: URL, tones: [URL], duration: Double) async throws {
         let videoAsset = AVURLAsset(url: movie)
-        let lowAsset = AVURLAsset(url: lowURL)
-        let highAsset = AVURLAsset(url: highURL)
         let composition = AVMutableComposition()
         guard let videoSource = try await videoAsset.loadTracks(withMediaType: .video).first,
               let videoTarget = composition.addMutableTrack(withMediaType: .video,
@@ -439,7 +443,7 @@ struct VerifyExport {
         }
         try videoTarget.insertTimeRange(CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600)),
                                         of: videoSource, at: .zero)
-        for sourceAsset in [lowAsset, highAsset] {
+        for sourceAsset in tones.map({ AVURLAsset(url: $0) }) {
             guard let source = try await sourceAsset.loadTracks(withMediaType: .audio).first,
                   let target = composition.addMutableTrack(withMediaType: .audio,
                                                            preferredTrackID: kCMPersistentTrackID_Invalid) else {
@@ -621,6 +625,324 @@ struct VerifyExport {
                 row[offset + 3] = 255
             }
         }
+    }
+
+    // MARK: Edits (timeline, audio, stage, captions)
+
+    /// A separate session with no cursor events (so no zoom or click rings) and time-varying
+    /// audio: track 1 ("system" by recorder order) is 440 Hz before 4 s and 660 Hz after; track 2
+    /// ("microphone") is a constant 880 Hz. The fixture crosshair moves with the frame index, so its
+    /// x position identifies which SOURCE time a rendered frame came from.
+    private static func verifyEdits(root: URL, width: Int, height: Int, duration: Double) async throws {
+        let directory = root.appendingPathComponent("edit-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let rawURL = directory.appendingPathComponent("raw.mp4")
+        try await makeFixture(url: rawURL, width: width, height: height, duration: duration)
+        let systemURL = directory.appendingPathComponent("system.wav")
+        let microphoneURL = directory.appendingPathComponent("microphone.wav")
+        try writeToneWAV(to: systemURL, duration: duration) { $0 < 4 ? 440 : 660 }
+        try writeToneWAV(to: microphoneURL, duration: duration) { _ in 880 }
+        try await muxAudio(into: rawURL, directory: directory, tones: [systemURL, microphoneURL], duration: duration)
+        let session = RecordingSession(
+            id: UUID(), createdAt: Date(), displayID: 1, width: width, height: height, duration: duration,
+            events: [], droppedFrames: 0, eventCaptureAvailable: true,
+            audio: AudioCaptureMetadata(systemAudioRequested: true, microphoneRequested: true,
+                                        systemAudioSamples: 1, microphoneSamples: 1,
+                                        systemAudioDroppedSamples: 0, microphoneDroppedSamples: 0)
+        )
+        try session.save(in: directory)
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+
+        // (a) Trim + split + reorder: keep [0,3] and [5,8], play [5,8] first; mute the microphone in [0,3].
+        var timeline = TimelineModel(sourceDuration: duration)
+        try timeline.split(atSource: 3)
+        try timeline.split(atSource: 5)
+        let early = timeline.segments[0].id, middle = timeline.segments[1].id, late = timeline.segments[2].id
+        try timeline.delete(segmentID: middle)
+        try timeline.move(segmentID: late, toIndex: 0)
+        try timeline.setVolume(segmentID: early, to: 0)
+        guard timeline.segments.map(\.sourceStart) == [5, 0], abs(timeline.playbackDuration - 6) < 1e-9 else {
+            throw VerificationError.failed("edit fixture timeline is \(timeline.segments)")
+        }
+        var captionConfig = CaptionConfiguration()
+        captionConfig.backgroundColor = "#00ffff"
+        captionConfig.backgroundOpacity = 1
+        let captionTrack = CaptionTrack(locale: "en-US", cues: [
+            CaptionCue(startMs: 3500, endMs: 4500, text: "TRIMMED"),
+            CaptionCue(startMs: 5500, endMs: 6500, text: "HELLO")
+        ])
+        let editedURL = directory.appendingPathComponent("edited.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: editedURL, settings: settings,
+                                           edit: ExportEdit(timeline: timeline, captions: (captionTrack, captionConfig)))
+        let edited = AVURLAsset(url: editedURL)
+        let editedDuration = try await edited.load(.duration).seconds
+        guard abs(editedDuration - 6) < 0.1 else {
+            throw VerificationError.failed("trimmed/reordered export lasts \(editedDuration)s, expected 6s (Σ segments)")
+        }
+        // Playback → source: [0,3) shows source 5…8, [3,6) shows source 0…3.
+        for (playback, source) in [(0.5, 5.5), (2.0, 7.0), (3.3, 0.3), (4.0, 1.0), (5.5, 2.5)] {
+            let measured = try await crosshairSourceTime(asset: edited, time: playback)
+            guard abs(measured - source) < 0.1 else {
+                throw VerificationError.failed("edited frame at playback \(playback)s shows source \(measured)s, expected \(source)s")
+            }
+            let quadrant = try await sampleColor(asset: edited, time: playback, x: 0.3, y: 0.7)
+            guard quadrant.matches(colorQuadrant(x: 0.3, y: 0.7)) else {
+                throw VerificationError.failed("edited frame at \(playback)s has \(quadrant) where the red quadrant belongs")
+            }
+        }
+
+        // (e) Captions follow SOURCE time: HELLO (source 5.5–6.5 s) plays at 0.5–1.5 s; the cue in
+        // the trimmed range never appears.
+        for (playback, visible) in [(0.2, false), (1.0, true), (1.4, true), (2.0, false), (2.9, false), (4.0, false), (5.9, false)] {
+            let cyan = try await captionPixels(asset: edited, time: playback)
+            guard visible ? cyan > 50 : cyan == 0 else {
+                throw VerificationError.failed("caption pixels at playback \(playback)s: \(cyan), expected \(visible ? "a caption" : "none")")
+            }
+        }
+
+        // (c) Audio follows the plan: per track, aligned to the video within 0.1 s; the system track
+        // plays the 660 Hz part first and the 440 Hz part after the reorder; the microphone is
+        // audible in [0,3) and muted (volume 0) in [3,6).
+        let editedAudio = try await edited.loadTracks(withMediaType: .audio)
+        guard editedAudio.count == 2 else {
+            throw VerificationError.failed("edited export has \(editedAudio.count) audio tracks, expected 2")
+        }
+        for track in editedAudio {
+            let range = try await track.load(.timeRange)
+            guard abs(range.start.seconds) < 0.05, abs(range.end.seconds - editedDuration) < 0.1 else {
+                throw VerificationError.failed("edited audio track spans \(range.start.seconds)…\(range.end.seconds)s, video \(editedDuration)s")
+            }
+        }
+        let system = try await decodeAudio(asset: edited, track: editedAudio[0])
+        let microphone = try await decodeAudio(asset: edited, track: editedAudio[1])
+        let systemFirst = analyze(system, from: 0.5, to: 2.5), systemSecond = analyze(system, from: 3.5, to: 5.5)
+        let micFirst = analyze(microphone, from: 0.5, to: 2.5), micSecond = analyze(microphone, from: 3.5, to: 5.5)
+        guard abs(systemFirst.frequency - 660) < 30, abs(systemSecond.frequency - 440) < 25, systemSecond.rms > 0.05 else {
+            throw VerificationError.failed("reordered system audio measured \(systemFirst) then \(systemSecond); expected 660 Hz then 440 Hz")
+        }
+        guard abs(micFirst.frequency - 880) < 40, micFirst.rms > 0.05, micSecond.rms < 0.002 else {
+            throw VerificationError.failed("microphone audio measured \(micFirst) then \(micSecond); expected 880 Hz then muted")
+        }
+
+        // (b) Speed: [0,2] at 1×, [2,4] at timeScale 2 (half speed), the rest deleted → 2 + 4 = 6 s.
+        var slow = TimelineModel(sourceDuration: duration)
+        try slow.split(atSource: 2)
+        let rest = try slow.split(atSource: 4)
+        try slow.delete(segmentID: rest)
+        try slow.setTimeScale(segmentID: slow.segments[1].id, to: 2)
+        let slowURL = directory.appendingPathComponent("slow.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: slowURL, settings: settings,
+                                           edit: ExportEdit(timeline: slow))
+        let slowAsset = AVURLAsset(url: slowURL)
+        let slowDuration = try await slowAsset.load(.duration).seconds
+        guard abs(slowDuration - 6) < 0.1 else {
+            throw VerificationError.failed("half-speed export lasts \(slowDuration)s, expected 6s")
+        }
+        for (playback, source) in [(1.0, 1.0), (3.0, 2.5), (4.0, 3.0), (5.0, 3.5)] {
+            let measured = try await crosshairSourceTime(asset: slowAsset, time: playback)
+            guard abs(measured - source) < 0.1 else {
+                throw VerificationError.failed("half-speed frame at playback \(playback)s shows source \(measured)s, expected \(source)s")
+            }
+        }
+        let slowTracks = try await slowAsset.loadTracks(withMediaType: .audio)
+        for track in slowTracks {
+            let range = try await track.load(.timeRange)
+            guard abs(range.end.seconds - slowDuration) < 0.1 else {
+                throw VerificationError.failed("half-speed audio ends at \(range.end.seconds)s, video at \(slowDuration)s")
+            }
+        }
+        // Pitch is preserved through the stretch (spectral time-pitch).
+        let slowSystem = analyze(try await decodeAudio(asset: slowAsset, track: slowTracks[0]), from: 2.5, to: 5.5)
+        guard abs(slowSystem.frequency - 440) < 25, slowSystem.rms > 0.05 else {
+            throw VerificationError.failed("half-speed system audio measured \(slowSystem); expected pitch-preserved 440 Hz")
+        }
+
+        // (d) Stage on 9:16: the background replaces the black bars; padding 0.1 × 404 px puts the
+        // 16:9 content in a 324×182 rect centered in the canvas.
+        var stage = StageStyle()
+        stage.paddingRatio = 0.1
+        stage.cornerRadius = 0
+        stage.shadow.intensity = 0
+        stage.background = .color("#ff8000")
+        let stageURL = directory.appendingPathComponent("stage.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: stageURL,
+                                           settings: ExportSettings(fps: 30, height: 720, aspectRatio: .preset(.tall)),
+                                           edit: ExportEdit(stage: stage))
+        let stageAsset = AVURLAsset(url: stageURL)
+        let orange = RGB(red: 255, green: 128, blue: 0)
+        for point in [(0.03, 0.03), (0.97, 0.97), (0.5, 0.05), (0.5, 0.95), (0.05, 0.5)] {
+            let pixel = try await sampleColor(asset: stageAsset, time: 1.0, x: point.0, y: point.1)
+            guard pixel.matches(orange) else {
+                throw VerificationError.failed("stage background at \(point) is \(pixel), expected orange")
+            }
+        }
+        let content = (minX: 40.0, width: 324.0, minY: (720 - 182.0) / 2, height: 182.0)
+        // Points clear of the fixture grid and of the crosshair at 1 s (source x 200, y 113).
+        for source in [(0.2, 0.4), (0.9, 0.4), (0.2, 0.6), (0.9, 0.6)] {
+            let pixel = try await sampleColor(asset: stageAsset, time: 1.0,
+                                              x: (content.minX + source.0 * content.width) / 404,
+                                              y: (content.minY + source.1 * content.height) / 720)
+            guard pixel.matches(colorQuadrant(x: source.0, y: source.1)) else {
+                throw VerificationError.failed("stage content at source \(source) is \(pixel), expected \(colorQuadrant(x: source.0, y: source.1))")
+            }
+        }
+        for (x, y) in [(content.minX - 8, 360.0), (content.minX + content.width + 8, 360.0), (202.0, content.minY - 8)] {
+            let pixel = try await sampleColor(asset: stageAsset, time: 1.0, x: x / 404, y: y / 720)
+            guard pixel.matches(orange) else {
+                throw VerificationError.failed("stage padding just outside the content at (\(x), \(y)) is \(pixel)")
+            }
+        }
+
+        // GIF honors the same edit: 6 s at 15 fps, frame at playback 4 s shows source 1 s.
+        let gifURL = directory.appendingPathComponent("edited.gif")
+        try await OfflineExporter().export(session: session, directory: directory, destination: gifURL,
+                                           settings: .gifDefault, edit: ExportEdit(timeline: timeline))
+        guard let gif = CGImageSourceCreateWithURL(gifURL as CFURL, nil),
+              abs(CGImageSourceGetCount(gif) - 90) <= 1,
+              let gifFrame = CGImageSourceCreateImageAtIndex(gif, 60, nil) else {
+            throw VerificationError.failed("edited GIF does not have the 6 s playback length")
+        }
+        let gifSource = try crosshairSourceTime(NSBitmapImageRep(cgImage: gifFrame))
+        guard abs(gifSource - 1.0) < 0.1 else {
+            throw VerificationError.failed("edited GIF frame at playback 4 s shows source \(gifSource)s, expected 1 s")
+        }
+
+        // (f) ExportEdit.load: absent files stay nil; present ones are picked up.
+        let empty = try ExportEdit.load(from: directory, session: session)
+        guard empty.isEmpty else { throw VerificationError.failed("ExportEdit.load invented edits for a bare session") }
+        var project = ViddeoProject.create(from: session, name: "Edit")
+        try project.apply(timeline)
+        try project.save(to: directory)
+        try stage.save(in: directory)
+        try captionTrack.save(to: directory)
+        let loaded = try ExportEdit.load(from: directory, session: session)
+        guard loaded.timeline == timeline, loaded.stage == stage, loaded.captions?.track == captionTrack,
+              loaded.captions?.configuration == CaptionConfiguration() else {
+            throw VerificationError.failed("ExportEdit.load did not pick up project, stage and captions")
+        }
+        var disabled = captionConfig
+        disabled.enabled = false
+        try disabled.save(in: directory)
+        guard try ExportEdit.load(from: directory, session: session).captions == nil else {
+            throw VerificationError.failed("ExportEdit.load kept captions that are disabled")
+        }
+        try captionConfig.save(in: directory)
+        guard try ExportEdit.load(from: directory, session: session).captions?.configuration == captionConfig else {
+            throw VerificationError.failed("ExportEdit.load ignored captions-config.json")
+        }
+    }
+
+    /// Source time of the fixture crosshair in a full-width content frame: the vertical line's x
+    /// on a row near the top (source y ≈ 0.05, clear of the horizontal grid), excluding grid columns.
+    private static func crosshairSourceTime(asset: AVAsset, time: Double) async throws -> Double {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
+        return try crosshairSourceTime(NSBitmapImageRep(cgImage: image))
+    }
+
+    private static func crosshairSourceTime(_ rep: NSBitmapImageRep) throws -> Double {
+        let y = Int(0.05 * Double(rep.pixelsHigh))
+        var runs: [(start: Int, end: Int)] = []
+        for x in 0..<rep.pixelsWide {
+            guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                  color.redComponent > 0.75, color.greenComponent > 0.75, color.blueComponent > 0.75 else { continue }
+            if let last = runs.last, last.end == x - 1 { runs[runs.count - 1].end = x } else { runs.append((x, x)) }
+        }
+        let scale = Double(rep.pixelsWide) / 640
+        let candidates = runs.map { Double($0.start + $0.end) / 2 / scale }.filter { center in
+            let grid = (center / 80).rounded() * 80
+            return abs(center - grid) > 5
+        }
+        guard candidates.count == 1 else {
+            throw VerificationError.failed("expected one crosshair column, found \(candidates) among runs \(runs)")
+        }
+        let frame = (candidates[0] / 640 - 0.25) / 0.5 * 239
+        return frame / 30
+    }
+
+    /// Fully opaque cyan caption-pill pixels in the lower part of the frame (none occur in the fixture).
+    private static func captionPixels(asset: AVAsset, time: Double) async throws -> Int {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let rep = NSBitmapImageRep(cgImage: try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image)
+        var count = 0
+        for y in stride(from: rep.pixelsHigh * 3 / 4, to: rep.pixelsHigh, by: 3) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 3) {
+                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent < 0.35, color.greenComponent > 0.7, color.blueComponent > 0.7 { count += 1 }
+            }
+        }
+        return count
+    }
+
+    private static func decodeAudio(asset: AVAsset, track: AVAssetTrack) async throws -> [Float] {
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsNonInterleaved: false
+        ])
+        guard reader.canAdd(output) else { throw VerificationError.failed("could not decode an audio track") }
+        reader.add(output)
+        guard reader.startReading() else { throw VerificationError.failed("could not start audio decoding") }
+        var samples: [Float] = []
+        while let buffer = output.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
+            let length = CMBlockBufferGetDataLength(block)
+            var chunk = [Float](repeating: 0, count: length / 4)
+            _ = chunk.withUnsafeMutableBytes {
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: $0.baseAddress!)
+            }
+            samples += chunk
+        }
+        guard reader.status == .completed else { throw VerificationError.failed("audio decoding did not complete") }
+        return samples
+    }
+
+    private struct ToneMeasure: CustomStringConvertible {
+        var frequency: Double
+        var rms: Double
+        var description: String { String(format: "%.0f Hz rms %.4f", frequency, rms) }
+    }
+
+    private static func analyze(_ samples: [Float], from start: Double, to end: Double) -> ToneMeasure {
+        let lower = min(samples.count, Int(start * 48_000)), upper = min(samples.count, Int(end * 48_000))
+        guard upper - lower > 100 else { return ToneMeasure(frequency: 0, rms: 0) }
+        var crossings = 0, energy = 0.0
+        for index in lower..<upper {
+            energy += Double(samples[index]) * Double(samples[index])
+            if index > lower, samples[index - 1] <= 0, samples[index] > 0 { crossings += 1 }
+        }
+        let seconds = Double(upper - lower) / 48_000
+        return ToneMeasure(frequency: Double(crossings) / seconds, rms: (energy / Double(upper - lower)).squareRoot())
+    }
+
+    /// Phase-continuous mono 48 kHz tone whose frequency may change over time.
+    private static func writeToneWAV(to url: URL, duration: Double, frequency: (Double) -> Double) throws {
+        let sampleRate = 48_000
+        let count = Int(Double(sampleRate) * duration)
+        var data = Data()
+        func put16(_ value: UInt16) { data.append(UInt8(value & 0xff)); data.append(UInt8(value >> 8)) }
+        func put32(_ value: UInt32) {
+            data.append(UInt8(value & 0xff)); data.append(UInt8((value >> 8) & 0xff))
+            data.append(UInt8((value >> 16) & 0xff)); data.append(UInt8(value >> 24))
+        }
+        data.append(contentsOf: Array("RIFF".utf8)); put32(UInt32(36 + count * 2))
+        data.append(contentsOf: Array("WAVEfmt ".utf8)); put32(16); put16(1); put16(1)
+        put32(UInt32(sampleRate)); put32(UInt32(sampleRate * 2)); put16(2); put16(16)
+        data.append(contentsOf: Array("data".utf8)); put32(UInt32(count * 2))
+        var phase = 0.0
+        for index in 0..<count {
+            put16(UInt16(bitPattern: Int16(sin(phase) * 10_000)))
+            phase += 2 * Double.pi * frequency(Double(index) / Double(sampleRate)) / Double(sampleRate)
+        }
+        try data.write(to: url)
     }
 
     private static func colorQuadrant(x: Double, y: Double) -> RGB {

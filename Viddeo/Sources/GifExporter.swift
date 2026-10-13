@@ -4,8 +4,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Animated GIF export through ImageIO. Frames are the same composited zoom/click frames as
-/// MP4, sampled at the preset frame rate; GIFs carry no audio.
+/// Animated GIF export through ImageIO. Frames are the same composited zoom/click/stage/caption
+/// frames as MP4 (including timeline edits), sampled at the preset frame rate; GIFs carry no audio.
 enum GifExporter {
     /// Bounds memory and file size; longer recordings must lower the frame rate or use MP4.
     static let maximumFrames = 3000
@@ -44,10 +44,11 @@ enum GifExporter {
                                frameCount: Int, settings: ExportSettings,
                                progress: (@Sendable (Double) -> Void)?) async throws {
         let asset = AVURLAsset(url: source)
-        let frames = try await SourceFrameReader(
-            asset: asset,
-            timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
-        )
+        // Without a timeline `duration` is the recording's; with one it is the playback duration
+        // and the source reader spans the whole recording.
+        let sourceDuration = renderer.edit == nil ? CMTime(seconds: duration, preferredTimescale: 600)
+            : try await asset.load(.duration)
+        let frames = try await ExportFrameSource(asset: asset, duration: sourceDuration, timeline: renderer.edit)
         defer { frames.cancel() }
         guard let gif = CGImageDestinationCreateWithURL(destination as CFURL, UTType.gif.identifier as CFString,
                                                         frameCount, nil) else {
@@ -67,8 +68,8 @@ enum GifExporter {
             try Task.checkCancellation()
             // Yield between frames so cancellation and UI progress stay responsive.
             await Task.yield()
-            let time = Double(index) / Double(settings.fps)
-            guard let sourceImage = try frames.image(at: time) else {
+            let time = renderer.sourceTime(forPlaybackTime: Double(index) / Double(settings.fps))
+            guard let sourceImage = try frames.image(atSource: time) else {
                 throw OfflineExporter.ExportError.encodingFailed("the raw recording has no decodable frames")
             }
             try autoreleasepool {
