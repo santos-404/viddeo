@@ -30,6 +30,11 @@ final class RecordingViewModel {
     private(set) var sessionDirectory: URL?
     private(set) var operationError: String?
     private(set) var exportedURL: URL?
+    private(set) var catalog = ExportPresetCatalog.builtIn
+    var selectedPresetID: String {
+        didSet { UserDefaults.standard.set(selectedPresetID, forKey: Self.presetDefaultsKey) }
+    }
+    @ObservationIgnored private static let presetDefaultsKey = "viddeo.exportPresetID"
     @ObservationIgnored private var captureDisplays: [UInt32: SCDisplay] = [:]
     @ObservationIgnored private let recorder = ScreenRecorder()
     @ObservationIgnored private let exporter = OfflineExporter()
@@ -39,8 +44,39 @@ final class RecordingViewModel {
     var canStop: Bool { phase == .recording }
     var canExport: Bool { phase == .idle && session != nil }
     var isBusy: Bool { phase != .idle }
+    var presets: [ExportPreset] { catalog.presets }
+
+    var selectedPreset: ExportPreset {
+        catalog.preset(id: selectedPresetID) ?? catalog.preset(id: catalog.defaultPresetID) ?? catalog.presets[0]
+    }
+
+    var presetSummary: String {
+        let settings = selectedPreset.settings.normalized()
+        let codec: String = switch settings.codec {
+        case .h264: "H.264"
+        case .h265: "HEVC"
+        case .both: "H.264 + HEVC (2 files)"
+        }
+        var parts = [settings.format == .gif ? "GIF" : codec]
+        if let session {
+            let size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+            parts.append("\(size.width)×\(size.height)")
+        } else {
+            parts.append("\(settings.height)p")
+        }
+        parts.append("\(settings.fps) fps")
+        parts.append(settings.quality.label)
+        if settings.format == .mp4, let session {
+            let size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+            let mbps = Double(settings.videoBitsPerSecond(width: size.width, height: size.height)) / 1_000_000
+            parts.append("≈\(mbps.formatted(.number.precision(.fractionLength(1)))) Mbps")
+        }
+        return parts.joined(separator: " · ")
+    }
 
     init() {
+        selectedPresetID = UserDefaults.standard.string(forKey: Self.presetDefaultsKey) ?? ExportPresetCatalog.builtIn.defaultPresetID
+        if catalog.preset(id: selectedPresetID) == nil { selectedPresetID = catalog.defaultPresetID }
         recorder.onFailure = { [weak self] error in
             guard let self else { return }
             self.phase = .idle
@@ -125,6 +161,7 @@ final class RecordingViewModel {
                 session = completed
                 sessionDirectory = directory
                 exportedURL = nil
+                let presetError = applyPresets(from: directory)
                 phase = .idle
                 status = "Recorded \(completed.duration.formatted(.number.precision(.fractionLength(1)))) seconds. Ready to export."
                 var warnings: [String] = []
@@ -139,6 +176,7 @@ final class RecordingViewModel {
                         warnings.append("No microphone samples were recorded. Check Microphone permission and your input device before recording again.")
                     }
                 }
+                if let presetError { warnings.append(presetError) }
                 operationError = warnings.isEmpty ? nil : warnings.joined(separator: "\n")
             } catch {
                 phase = .idle
@@ -151,9 +189,13 @@ final class RecordingViewModel {
 
     func exportRecording() {
         guard canExport, let session, let directory = sessionDirectory else { return }
+        let settings = selectedPreset.settings.normalized()
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = "viddeo-\(session.id.uuidString.prefix(8)).mp4"
+        panel.allowedContentTypes = [settings.format == .gif ? .gif : .mpeg4Movie]
+        panel.nameFieldStringValue = "viddeo-\(session.id.uuidString.prefix(8)).\(settings.format == .gif ? "gif" : "mp4")"
+        if settings.format == .mp4 && settings.codec == .both {
+            panel.message = "A second file with an -h265 suffix will be written next to the one you choose."
+        }
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         phase = .exporting
         operationError = nil
@@ -161,9 +203,12 @@ final class RecordingViewModel {
         operation = Task {
             do {
                 try await exporter.export(session: session, directory: directory, destination: destination,
-                                          showsClickEffects: showsClickEffects)
+                                          showsClickEffects: showsClickEffects, settings: settings)
                 exportedURL = destination
-                status = "Export saved to \(destination.lastPathComponent)."
+                let names = settings.format == .gif
+                    ? [destination.lastPathComponent]
+                    : settings.outputURLs(for: destination).map(\.url.lastPathComponent)
+                status = "Export saved to \(names.joined(separator: " and "))."
             } catch {
                 operationError = error.localizedDescription
                 status = "Export failed. Raw recording is still available."
@@ -186,11 +231,26 @@ final class RecordingViewModel {
             session = loaded
             sessionDirectory = directory
             exportedURL = nil
-            operationError = loaded.eventCaptureAvailable ? nil : "This session has incomplete pointer events; raw video remains available."
+            let presetError = applyPresets(from: directory)
+            let eventWarning = loaded.eventCaptureAvailable ? nil : "This session has incomplete pointer events; raw video remains available."
+            operationError = [eventWarning, presetError].compactMap { $0 }.joined(separator: "\n").nilIfEmpty
             status = "Loaded session \(loaded.id.uuidString.prefix(8)). Ready to export."
         } catch {
             operationError = error.localizedDescription
         }
+    }
+
+    /// Loads the session's preset catalog, keeping the built-in one on failure; returns the error text if any.
+    private func applyPresets(from directory: URL) -> String? {
+        var failure: String?
+        do {
+            catalog = try ExportPresetCatalog.load(from: directory)
+        } catch {
+            catalog = .builtIn
+            failure = error.localizedDescription
+        }
+        if catalog.preset(id: selectedPresetID) == nil { selectedPresetID = catalog.defaultPresetID }
+        return failure
     }
 
     func revealSession() {
@@ -214,4 +274,8 @@ final class RecordingViewModel {
         await operation?.value
         if canStop { stopRecording(); await operation?.value }
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

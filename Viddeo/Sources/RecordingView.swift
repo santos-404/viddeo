@@ -40,6 +40,18 @@ struct RecordingView: View {
             Toggle("Show click effects in export", isOn: $viewModel.showsClickEffects)
                 .disabled(viewModel.isBusy)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Export preset", selection: $viewModel.selectedPresetID) {
+                    ForEach(viewModel.presets, id: \.id) { preset in
+                        Text(preset.name).tag(preset.id)
+                    }
+                }
+                .disabled(viewModel.isBusy)
+                Text(viewModel.presetSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack(spacing: 10) {
                 Button("Start") { viewModel.startRecording() }
                     .disabled(!viewModel.canStart)
