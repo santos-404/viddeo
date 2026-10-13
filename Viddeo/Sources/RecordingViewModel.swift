@@ -30,6 +30,7 @@ final class RecordingViewModel {
     private(set) var sessionDirectory: URL?
     private(set) var operationError: String?
     private(set) var exportedURL: URL?
+    private(set) var editor: EditorModel?
     private(set) var catalog = ExportPresetCatalog.builtIn
     var selectedPresetID: String {
         didSet { UserDefaults.standard.set(selectedPresetID, forKey: Self.presetDefaultsKey) }
@@ -40,10 +41,10 @@ final class RecordingViewModel {
     @ObservationIgnored private let exporter = OfflineExporter()
     @ObservationIgnored private var operation: Task<Void, Never>?
 
-    var canStart: Bool { phase == .idle && selectedDisplayID != nil && !isRefreshing }
+    var canStart: Bool { !isBusy && selectedDisplayID != nil && !isRefreshing }
     var canStop: Bool { phase == .recording }
-    var canExport: Bool { phase == .idle && session != nil }
-    var isBusy: Bool { phase != .idle }
+    var canExport: Bool { !isBusy && session != nil && editor != nil }
+    var isBusy: Bool { phase != .idle || editor?.isWorking == true }
     var presets: [ExportPreset] { catalog.presets }
 
     var selectedPreset: ExportPreset {
@@ -126,6 +127,7 @@ final class RecordingViewModel {
 
     func startRecording() {
         guard canStart, let selectedDisplayID, let display = captureDisplays[selectedDisplayID] else { return }
+        guard preserveEdits() else { return }
         phase = .starting
         operationError = nil
         status = "Starting capture…"
@@ -162,6 +164,7 @@ final class RecordingViewModel {
                 sessionDirectory = directory
                 exportedURL = nil
                 let presetError = applyPresets(from: directory)
+                let editorError = openEditor(session: completed, directory: directory)
                 phase = .idle
                 status = "Recorded \(completed.duration.formatted(.number.precision(.fractionLength(1)))) seconds. Ready to export."
                 var warnings: [String] = []
@@ -177,6 +180,7 @@ final class RecordingViewModel {
                     }
                 }
                 if let presetError { warnings.append(presetError) }
+                if let editorError { warnings.append(editorError) }
                 operationError = warnings.isEmpty ? nil : warnings.joined(separator: "\n")
             } catch {
                 phase = .idle
@@ -188,7 +192,8 @@ final class RecordingViewModel {
     }
 
     func exportRecording() {
-        guard canExport, let session, let directory = sessionDirectory else { return }
+        guard canExport, let session, let directory = sessionDirectory, let editor else { return }
+        let edit = editor.exportEdit
         let settings = selectedPreset.settings.normalized()
         let panel = NSSavePanel()
         panel.allowedContentTypes = [settings.format == .gif ? .gif : .mpeg4Movie]
@@ -203,7 +208,7 @@ final class RecordingViewModel {
         operation = Task {
             do {
                 try await exporter.export(session: session, directory: directory, destination: destination,
-                                          showsClickEffects: showsClickEffects, settings: settings)
+                                          showsClickEffects: showsClickEffects, settings: settings, edit: edit)
                 exportedURL = destination
                 let names = settings.format == .gif
                     ? [destination.lastPathComponent]
@@ -220,18 +225,22 @@ final class RecordingViewModel {
     @ObservationIgnored private var activeDirectory: URL?
 
     func loadSession() {
-        guard phase == .idle else { return }
+        guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.message = "Choose a Viddeo session.json to export a saved recording."
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard preserveEdits() else { return }
         do {
             let directory = url.deletingLastPathComponent()
             let loaded = try RecordingSession.load(from: directory)
+            let loadedEditor = try EditorModel(session: loaded, directory: directory)
             session = loaded
+            editor = loadedEditor
             sessionDirectory = directory
             exportedURL = nil
             let presetError = applyPresets(from: directory)
+            if let preset = loadedEditor.project.exportPresetID, catalog.preset(id: preset) != nil { selectedPresetID = preset }
             let eventWarning = loaded.eventCaptureAvailable ? nil : "This session has incomplete pointer events; raw video remains available."
             operationError = [eventWarning, presetError].compactMap { $0 }.joined(separator: "\n").nilIfEmpty
             status = "Loaded session \(loaded.id.uuidString.prefix(8)). Ready to export."
@@ -253,6 +262,25 @@ final class RecordingViewModel {
         return failure
     }
 
+    private func openEditor(session: RecordingSession, directory: URL) -> String? {
+        do {
+            editor = try EditorModel(session: session, directory: directory)
+            return nil
+        } catch {
+            editor = nil
+            return "The recording was saved, but its editor could not load: \(error.localizedDescription)"
+        }
+    }
+
+    private func preserveEdits() -> Bool {
+        guard let editor, editor.isDirty else { return true }
+        guard editor.save(presetID: selectedPresetID) else {
+            operationError = editor.error
+            return false
+        }
+        return true
+    }
+
     func revealSession() {
         guard let sessionDirectory else { return }
         NSWorkspace.shared.activateFileViewerSelecting([sessionDirectory])
@@ -270,9 +298,11 @@ final class RecordingViewModel {
     }
 
     /// Called by the application delegate to finalize a recording before quitting.
-    func finishBeforeQuit() async {
+    func finishBeforeQuit() async -> Bool {
         await operation?.value
         if canStop { stopRecording(); await operation?.value }
+        await editor?.finishOperation()
+        return preserveEdits()
     }
 }
 

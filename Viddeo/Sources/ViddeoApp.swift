@@ -9,10 +9,10 @@ struct ViddeoApp: App {
     var body: some Scene {
         WindowGroup {
             RecordingView(viewModel: recordingViewModel)
-                .frame(minWidth: 520, minHeight: 360)
+                .frame(minWidth: 820, minHeight: 700)
                 .onAppear { delegate.viewModel = recordingViewModel }
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.automatic)
     }
 }
 
@@ -21,10 +21,10 @@ final class ViddeoApplicationDelegate: NSObject, NSApplicationDelegate {
     var viewModel: RecordingViewModel?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let viewModel, viewModel.isBusy else { return .terminateNow }
+        guard let viewModel, viewModel.isBusy || viewModel.editor?.isDirty == true else { return .terminateNow }
         Task {
-            await viewModel.finishBeforeQuit()
-            sender.reply(toApplicationShouldTerminate: true)
+            let saved = await viewModel.finishBeforeQuit()
+            sender.reply(toApplicationShouldTerminate: saved)
         }
         return .terminateLater
     }

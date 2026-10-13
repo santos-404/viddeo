@@ -14,6 +14,8 @@ struct ViddeoProject: Codable, Sendable, Equatable {
     var sessionID: UUID
     var timeline: TimelineModel
     var exportPresetID: String?
+    /// Absent in older projects: enable a stage when its sidecar exists.
+    var stageEnabled: Bool? = nil
 
     /// Dates are stored as whole-second ISO 8601, so in-memory values are truncated to match.
     static func create(from session: RecordingSession, name: String?, now: Date = Date()) -> Self {

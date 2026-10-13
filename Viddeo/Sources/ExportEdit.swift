@@ -32,10 +32,13 @@ struct ExportEdit: Sendable {
     static func load(from directory: URL, session: RecordingSession) throws -> ExportEdit {
         let manager = FileManager.default
         var edit = ExportEdit()
+        var stageEnabled: Bool?
         if manager.fileExists(atPath: directory.appendingPathComponent(ViddeoProject.filename).path) {
-            edit.timeline = try ViddeoProject.load(from: directory, session: session).timeline
+            let project = try ViddeoProject.load(from: directory, session: session)
+            edit.timeline = project.timeline
+            stageEnabled = project.stageEnabled
         }
-        if manager.fileExists(atPath: directory.appendingPathComponent("stage-config.json").path) {
+        if stageEnabled != false, manager.fileExists(atPath: directory.appendingPathComponent("stage-config.json").path) {
             edit.stage = try StageStyle.load(in: directory)
         }
         if let track = try CaptionTrack.load(from: directory), !track.cues.isEmpty {

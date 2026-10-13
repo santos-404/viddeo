@@ -4,6 +4,7 @@ struct RecordingView: View {
     @Bindable var viewModel: RecordingViewModel
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             Text("Viddeo")
                 .font(.largeTitle)
@@ -104,9 +105,14 @@ struct RecordingView: View {
                 }
             }
 
-            Spacer(minLength: 0)
+            if let editor = viewModel.editor {
+                Divider()
+                EditorView(editor: editor, presetID: viewModel.selectedPresetID)
+                    .disabled(viewModel.phase != .idle || editor.isWorking)
+            }
         }
         .padding(24)
+        }
         .task {
             await viewModel.refreshDisplays()
         }
