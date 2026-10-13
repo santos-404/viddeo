@@ -1,0 +1,61 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 60;
+	objects = {
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* ViddeoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* ViddeoApp.swift */; };
+		A10000000000000000000002 /* RecordingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* RecordingView.swift */; };
+		A10000000000000000000003 /* RecordingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* RecordingViewModel.swift */; };
+		A1000000000000000000000A /* RecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A; };
+		A1000000000000000000000B /* ZoomTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B; };
+		A1000000000000000000000C /* ScreenRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C; };
+		A1000000000000000000000D /* CursorRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D; };
+		A1000000000000000000000E /* OfflineExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E; };
+/* End PBXBuildFile section */
+/* Begin PBXFileReference section */
+		B10000000000000000000001 /* ViddeoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViddeoApp.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* RecordingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingView.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* RecordingViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingViewModel.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000000000000000000005 /* Viddeo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Viddeo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000000000000000000000A /* RecordingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingSession.swift; sourceTree = "<group>"; };
+		B1000000000000000000000B /* ZoomTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomTimeline.swift; sourceTree = "<group>"; };
+		B1000000000000000000000C /* ScreenRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenRecorder.swift; sourceTree = "<group>"; };
+		B1000000000000000000000D /* CursorRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CursorRecorder.swift; sourceTree = "<group>"; };
+		B1000000000000000000000E /* OfflineExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineExporter.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+/* Begin PBXFrameworksBuildPhase section */
+		C10000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+/* Begin PBXGroup section */
+		D10000000000000000000001 = {isa = PBXGroup; children = (D10000000000000000000002 /* Sources */, D10000000000000000000003 /* Products */, B10000000000000000000004 /* Info.plist */, ); sourceTree = "<group>"; };
+		D10000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (B10000000000000000000001 /* ViddeoApp.swift */, B10000000000000000000002 /* RecordingView.swift */, B10000000000000000000003 /* RecordingViewModel.swift */, B1000000000000000000000E /* OfflineExporter.swift */, B1000000000000000000000D /* CursorRecorder.swift */, B1000000000000000000000C /* ScreenRecorder.swift */, B1000000000000000000000B /* ZoomTimeline.swift */, B1000000000000000000000A /* RecordingSession.swift */, ); path = Sources; sourceTree = "<group>"; };
+		D10000000000000000000003 /* Products */ = {isa = PBXGroup; children = (B10000000000000000000005 /* Viddeo.app */, ); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		E10000000000000000000001 /* Viddeo */ = {isa = PBXNativeTarget; buildConfigurationList = F10000000000000000000002 /* Build configuration list for PBXNativeTarget "Viddeo" */; buildPhases = (C10000000000000000000002 /* Sources */, C10000000000000000000001 /* Frameworks */, C10000000000000000000003 /* Resources */, ); buildRules = (); dependencies = (); name = Viddeo; productName = Viddeo; productReference = B10000000000000000000005 /* Viddeo.app */; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		E10000000000000000000002 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 2700; }; buildConfigurationList = F10000000000000000000001 /* Build configuration list for PBXProject "Viddeo" */; compatibilityVersion = "Xcode 15.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = D10000000000000000000001; productRefGroup = D10000000000000000000003 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (E10000000000000000000001 /* Viddeo */, ); };
+/* End PBXProject section */
+/* Begin PBXResourcesBuildPhase section */
+		C10000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+/* Begin PBXSourcesBuildPhase section */
+		C10000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* ViddeoApp.swift in Sources */, A10000000000000000000002 /* RecordingView.swift in Sources */, A10000000000000000000003 /* RecordingViewModel.swift in Sources */, A1000000000000000000000E /* OfflineExporter.swift in Sources */, A1000000000000000000000D /* CursorRecorder.swift in Sources */, A1000000000000000000000C /* ScreenRecorder.swift in Sources */, A1000000000000000000000B /* ZoomTimeline.swift in Sources */, A1000000000000000000000A /* RecordingSession.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+/* Begin XCBuildConfiguration section */
+		F10000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; MACOSX_DEPLOYMENT_TARGET = 26.0; PRODUCT_BUNDLE_IDENTIFIER = com.viddeo.app; PRODUCT_NAME = Viddeo; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Debug; };
+		F10000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; MACOSX_DEPLOYMENT_TARGET = 26.0; PRODUCT_BUNDLE_IDENTIFIER = com.viddeo.app; PRODUCT_NAME = Viddeo; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Release; };
+		F10000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = macosx; }; name = Debug; };
+		F10000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = macosx; }; name = Release; };
+/* End XCBuildConfiguration section */
+/* Begin XCConfigurationList section */
+		F10000000000000000000001 /* Build configuration list for PBXProject "Viddeo" */ = {isa = XCConfigurationList; buildConfigurations = (F10000000000000000000005 /* Debug */, F10000000000000000000006 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		F10000000000000000000002 /* Build configuration list for PBXNativeTarget "Viddeo" */ = {isa = XCConfigurationList; buildConfigurations = (F10000000000000000000003 /* Debug */, F10000000000000000000004 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = E10000000000000000000002 /* Project object */;
+}
