@@ -24,8 +24,10 @@ const src = fs.readFileSync(input, "utf8");
 const head = /^(?:const|var|let) (_0x[0-9a-f]+)=(_0x[0-9a-f]+);/.exec(src);
 if (!head) throw new Error("no `const alias=decoder;` header found — not the expected obfuscation shape");
 const [, rootAlias, decoderName] = head;
-const iifeStart = src.indexOf("(function(", head[0].length);
-if (iifeStart < 0 || iifeStart > 400) throw new Error("rotation IIFE not found near file head");
+// The rotation IIFE follows the string-array function; some bundles put the array
+// first, so search from the end of that function rather than only near the head.
+let iifeStart = src.indexOf("(function(", head[0].length);
+if (iifeStart < 0) throw new Error("rotation IIFE not found");
 
 // --- balanced-region scanner that respects string literals
 function scanBalanced(text, start, open, close) {
