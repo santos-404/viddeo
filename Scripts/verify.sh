@@ -19,6 +19,17 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
-  Viddeo/Sources/OfflineExporter.swift Scripts/verify-export.swift \
+  Viddeo/Sources/ClickEffects.swift Viddeo/Sources/OfflineExporter.swift Scripts/verify-export.swift \
   -o .build/verify-export
 .build/verify-export
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/CursorRecorder.swift \
+  Viddeo/Sources/ScreenRecorder.swift Scripts/verify-audio.swift \
+  -o .build/verify-audio
+.build/verify-audio
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ClickEffects.swift \
+  Scripts/verify-clicks.swift -o .build/verify-clicks
+.build/verify-clicks

@@ -22,6 +22,7 @@ struct RecordingSession: Codable, Sendable {
     var events: [CursorEvent]
     var droppedFrames: Int
     var eventCaptureAvailable: Bool
+    var audio: AudioCaptureMetadata? = nil
 
     func save(in directory: URL) throws {
         let encoder = JSONEncoder()
@@ -32,4 +33,16 @@ struct RecordingSession: Codable, Sendable {
     static func load(from directory: URL) throws -> Self {
         try JSONDecoder().decode(Self.self, from: Data(contentsOf: directory.appendingPathComponent("session.json")))
     }
+}
+
+/// Capture diagnostics for the optional, independently encoded AAC tracks in raw.mp4.
+struct AudioCaptureMetadata: Codable, Sendable, Equatable {
+    var systemAudioRequested: Bool
+    var microphoneRequested: Bool
+    var systemAudioSamples: Int
+    var microphoneSamples: Int
+    var systemAudioDroppedSamples: Int
+    var microphoneDroppedSamples: Int
+    var systemAudioTrackName = "System Audio"
+    var microphoneTrackName = "Microphone"
 }

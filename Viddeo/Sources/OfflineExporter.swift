@@ -32,7 +32,8 @@ final class OfflineExporter {
         }
     }
 
-    func export(session: RecordingSession, directory: URL, destination: URL) async throws {
+    func export(session: RecordingSession, directory: URL, destination: URL,
+                showsClickEffects: Bool = true) async throws {
         guard session.version == 1 else {
             throw ExportError.invalidSession("unsupported session version \(session.version)")
         }
@@ -108,6 +109,8 @@ final class OfflineExporter {
         let zoomConfiguration = try ZoomConfiguration.load(in: directory)
         try zoomConfiguration.validate()
         let timeline = ZoomTimeline(session: session, configuration: zoomConfiguration)
+        let clickTimeline = showsClickEffects
+            ? ClickEffectTimeline(events: session.events, duration: session.duration) : nil
         let width = session.width
         let height = session.height
         let temporaryURL = outputURL.deletingLastPathComponent()
@@ -121,11 +124,14 @@ final class OfflineExporter {
 
                 // The recorder writes identity-oriented frames. Rotated source tracks are
                 // rejected above until their CI request coordinate space is verified.
-                let source = request.sourceImage
-                let bounds = source.extent
-                let image = source.transformed(
+                let rawSource = request.sourceImage
+                let bounds = rawSource.extent
+                let normalizedSource = rawSource.transformed(
                     by: CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY)
                 )
+                // Click locations are in the original top-left source coordinate
+                // space, so render them before applying the zoom transform.
+                let image = clickTimeline?.image(over: normalizedSource, at: time) ?? normalizedSource
                 let scale = frame.scale.isFinite ? max(1, frame.scale) : 1
                 let cropWidth = CGFloat(width) / CGFloat(scale)
                 let cropHeight = CGFloat(height) / CGFloat(scale)

@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import CoreGraphics
 import CoreMedia
 import Foundation
@@ -11,6 +12,7 @@ final class ScreenRecorder {
         case noFrames
         case inactive
         case invalidDimensions
+        case microphonePermissionDenied
         case streamFailure(String)
 
         var errorDescription: String? {
@@ -19,6 +21,7 @@ final class ScreenRecorder {
             case .noFrames: "Screen capture stopped before a complete video frame arrived."
             case .inactive: "There is no active recording to stop."
             case .invalidDimensions: "The selected display reported invalid pixel dimensions."
+            case .microphonePermissionDenied: "Microphone access is required to record microphone audio. Allow it in System Settings → Privacy & Security → Microphone."
             case .streamFailure(let message): "Screen capture failed: \(message)"
             }
         }
@@ -39,14 +42,27 @@ final class ScreenRecorder {
     private var isStarting = false
     private var isStopping = false
     private var pendingCaptureFailure: Error?
+    private var audioOptions = (system: false, microphone: false)
 
-    func start(display: SCDisplay, directory: URL) async throws {
+    func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false) async throws {
         guard stream == nil, !isStarting, !isStopping else { throw RecorderError.alreadyRecording }
         let dimensions = try Self.captureDimensions(displayID: display.displayID)
+        isStarting = true
+        if capturesMicrophone {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            if status == .notDetermined {
+                guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                    isStarting = false
+                    throw RecorderError.microphonePermissionDenied
+                }
+            } else if status == .denied || status == .restricted {
+                isStarting = false
+                throw RecorderError.microphonePermissionDenied
+            }
+        }
         generation &+= 1
         let startGeneration = generation
         currentGeneration = startGeneration
-        isStarting = true
         pendingCaptureFailure = nil
         let pipeline = ScreenWriterPipeline()
         var pendingStream: SCStream?
@@ -57,12 +73,18 @@ final class ScreenRecorder {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let videoURL = directory.appendingPathComponent("raw.mp4")
             try? FileManager.default.removeItem(at: videoURL)
-            try await pipeline.prepare(url: videoURL, width: dimensions.width, height: dimensions.height)
+            try await pipeline.prepare(url: videoURL, width: dimensions.width, height: dimensions.height,
+                                       capturesSystemAudio: capturesSystemAudio, capturesMicrophone: capturesMicrophone)
 
             let configuration = SCStreamConfiguration()
             configuration.width = dimensions.width
             configuration.height = dimensions.height
-            configuration.capturesAudio = false
+            configuration.capturesAudio = capturesSystemAudio
+            configuration.captureMicrophone = capturesMicrophone
+            if capturesSystemAudio || capturesMicrophone {
+                configuration.sampleRate = 48_000
+                configuration.channelCount = 2
+            }
             configuration.showsCursor = true
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
 
@@ -78,6 +100,12 @@ final class ScreenRecorder {
             let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
             pendingStream = stream
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: pipeline.sampleQueue)
+            if capturesSystemAudio {
+                try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: pipeline.sampleQueue)
+            }
+            if capturesMicrophone {
+                try stream.addStreamOutput(output, type: .microphone, sampleHandlerQueue: pipeline.sampleQueue)
+            }
 
             self.pipeline = pipeline
             self.output = output
@@ -86,6 +114,7 @@ final class ScreenRecorder {
             self.displayID = display.displayID
             self.dimensions = dimensions
             self.createdAt = Date()
+            self.audioOptions = (capturesSystemAudio, capturesMicrophone)
 
             cursorRecorder.start(displayID: display.displayID)
             try await stream.startCapture()
@@ -130,7 +159,8 @@ final class ScreenRecorder {
                 duration: duration,
                 events: events,
                 droppedFrames: finished.droppedFrames,
-                eventCaptureAvailable: cursorRecorder.wasAvailableForSession
+                eventCaptureAvailable: cursorRecorder.wasAvailableForSession,
+                audio: audioOptions.system || audioOptions.microphone ? finished.audio : nil
             )
             clearSession(generation: stopGeneration)
             try session.save(in: directory)
@@ -173,6 +203,7 @@ final class ScreenRecorder {
         createdAt = nil
         currentGeneration = nil
         pendingCaptureFailure = nil
+        audioOptions = (false, false)
         isStarting = false
         isStopping = false
     }
@@ -196,6 +227,7 @@ final class ScreenWriterPipeline: @unchecked Sendable {
     struct Result {
         let duration: Double
         let droppedFrames: Int
+        let audio: AudioCaptureMetadata
     }
 
     let sampleQueue = DispatchQueue(label: "com.viddeo.screen-recorder.samples")
@@ -203,6 +235,8 @@ final class ScreenWriterPipeline: @unchecked Sendable {
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
+    private var systemAudioInput: AVAssetWriterInput?
+    private var microphoneInput: AVAssetWriterInput?
     private var firstPTS: CMTime?
     private var lastPTS: CMTime?
     private var lastSampleBuffer: CMSampleBuffer?
@@ -212,8 +246,17 @@ final class ScreenWriterPipeline: @unchecked Sendable {
     private var storedError: Error?
     private var failureReported = false
     private var isFinishing = false
+    private var requestedSystemAudio = false
+    private var requestedMicrophone = false
+    private var systemAudioSamples = 0
+    private var microphoneSamples = 0
+    private var systemAudioDroppedSamples = 0
+    private var microphoneDroppedSamples = 0
+    private var pendingAudioSamples: [(buffer: CMSampleBuffer, microphone: Bool)] = []
+    private var lastSystemAudioPTS: CMTime?
+    private var lastMicrophonePTS: CMTime?
 
-    func prepare(url: URL, width: Int, height: Int) async throws {
+    func prepare(url: URL, width: Int, height: Int, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false) async throws {
         try await withCheckedThrowingContinuation { continuation in
             sampleQueue.async {
                 do {
@@ -232,11 +275,35 @@ final class ScreenWriterPipeline: @unchecked Sendable {
                         throw ScreenRecorder.RecorderError.streamFailure("The H.264 writer input could not be configured.")
                     }
                     writer.add(input)
+                    func makeAudioInput(name: String) throws -> AVAssetWriterInput {
+                        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                            AVFormatIDKey: kAudioFormatMPEG4AAC,
+                            AVSampleRateKey: 48_000,
+                            AVNumberOfChannelsKey: 2,
+                            AVEncoderBitRateKey: 192_000
+                        ])
+                        audioInput.expectsMediaDataInRealTime = true
+                        let title = AVMutableMetadataItem()
+                        title.identifier = .commonIdentifierTitle
+                        title.value = name as NSString
+                        audioInput.metadata = [title]
+                        guard writer.canAdd(audioInput) else {
+                            throw ScreenRecorder.RecorderError.streamFailure("An AAC audio writer input could not be configured.")
+                        }
+                        writer.add(audioInput)
+                        return audioInput
+                    }
+                    let systemInput = capturesSystemAudio ? try makeAudioInput(name: "System Audio") : nil
+                    let microphoneInput = capturesMicrophone ? try makeAudioInput(name: "Microphone") : nil
                     guard writer.startWriting() else {
                         throw writer.error ?? ScreenRecorder.RecorderError.streamFailure("The video writer could not start.")
                     }
                     self.writer = writer
                     self.input = input
+                    self.systemAudioInput = systemInput
+                    self.microphoneInput = microphoneInput
+                    self.requestedSystemAudio = capturesSystemAudio
+                    self.requestedMicrophone = capturesMicrophone
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -277,12 +344,67 @@ final class ScreenWriterPipeline: @unchecked Sendable {
             return
         }
         if isFirstFrame { firstPTS = pts }
+        if isFirstFrame { flushPendingAudioSamples() }
         lastPTS = pts
         lastSampleBuffer = sampleBuffer
         let frameDuration = CMSampleBufferGetDuration(sampleBuffer)
         if frameDuration.isValid, frameDuration.isNumeric, frameDuration.seconds > 0 {
             lastFrameDuration = frameDuration
         }
+    }
+
+    func consumeAudio(_ sampleBuffer: CMSampleBuffer, microphone: Bool) {
+        guard !isFinishing, writer != nil, CMSampleBufferIsValid(sampleBuffer) else { return }
+        guard (microphone ? microphoneInput : systemAudioInput) != nil else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard pts.isValid, pts.isNumeric else { countAudioDrop(microphone); return }
+        let previousPTS = microphone ? lastMicrophonePTS : lastSystemAudioPTS
+        guard previousPTS.map({ CMTimeCompare(pts, $0) > 0 }) ?? true else {
+            countAudioDrop(microphone)
+            return
+        }
+        if microphone { lastMicrophonePTS = pts } else { lastSystemAudioPTS = pts }
+        guard firstPTS != nil else {
+            // ScreenCaptureKit may deliver an initial audio packet before its first
+            // screen callback. Retain a bounded startup window, then trim it once
+            // the video epoch is known.
+            guard pendingAudioSamples.count < 256 else { countAudioDrop(microphone); return }
+            pendingAudioSamples.append((sampleBuffer, microphone))
+            return
+        }
+        appendAudioSample(sampleBuffer, microphone: microphone)
+    }
+
+    private func flushPendingAudioSamples() {
+        let pending = pendingAudioSamples
+        pendingAudioSamples.removeAll(keepingCapacity: false)
+        for sample in pending {
+            appendAudioSample(sample.buffer, microphone: sample.microphone)
+        }
+    }
+
+    private func appendAudioSample(_ sampleBuffer: CMSampleBuffer, microphone: Bool) {
+        guard let writer, let audioInput = microphone ? microphoneInput : systemAudioInput else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard pts.isValid, pts.isNumeric else { countAudioDrop(microphone); return }
+        // The movie epoch is the first accepted video frame. Samples before it cannot
+        // be represented without shifting video and are discarded explicitly.
+        guard let firstPTS, CMTimeCompare(pts, firstPTS) >= 0 else { countAudioDrop(microphone); return }
+        guard storedError == nil, writer.status == .writing, audioInput.isReadyForMoreMediaData else {
+            countAudioDrop(microphone)
+            return
+        }
+        guard audioInput.append(sampleBuffer) else {
+            let error = writer.error ?? ScreenRecorder.RecorderError.streamFailure("The audio writer rejected a capture sample.")
+            fail(error)
+            countAudioDrop(microphone)
+            return
+        }
+        if microphone { microphoneSamples += 1 } else { systemAudioSamples += 1 }
+    }
+
+    private func countAudioDrop(_ microphone: Bool) {
+        if microphone { microphoneDroppedSamples += 1 } else { systemAudioDroppedSamples += 1 }
     }
 
     func firstFrameAnchor() -> (host: CMTime, pts: CMTime)? {
@@ -411,6 +533,8 @@ final class ScreenWriterPipeline: @unchecked Sendable {
         }
         writer.endSession(atSourceTime: endTime)
         input.markAsFinished()
+        systemAudioInput?.markAsFinished()
+        microphoneInput?.markAsFinished()
         writer.finishWriting {
             self.sampleQueue.async {
                 guard let completedWriter = self.writer, completedWriter.status == .completed else {
@@ -418,7 +542,15 @@ final class ScreenWriterPipeline: @unchecked Sendable {
                     return
                 }
                 let duration = max(0, CMTimeSubtract(endTime, firstPTS).seconds)
-                continuation.resume(returning: Result(duration: duration, droppedFrames: self.droppedFrames))
+                let audio = AudioCaptureMetadata(
+                    systemAudioRequested: self.requestedSystemAudio,
+                    microphoneRequested: self.requestedMicrophone,
+                    systemAudioSamples: self.systemAudioSamples,
+                    microphoneSamples: self.microphoneSamples,
+                    systemAudioDroppedSamples: self.systemAudioDroppedSamples,
+                    microphoneDroppedSamples: self.microphoneDroppedSamples
+                )
+                continuation.resume(returning: Result(duration: duration, droppedFrames: self.droppedFrames, audio: audio))
             }
         }
     }
@@ -430,6 +562,9 @@ final class ScreenWriterPipeline: @unchecked Sendable {
                 self.writer?.cancelWriting()
                 self.writer = nil
                 self.input = nil
+                self.systemAudioInput = nil
+                self.microphoneInput = nil
+                self.pendingAudioSamples.removeAll()
                 self.lastSampleBuffer = nil
                 self.heldFrameForFinish = nil
                 continuation.resume()
@@ -468,8 +603,18 @@ private final class ScreenStreamOutput: NSObject, SCStreamOutput, SCStreamDelega
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen else { return }
-        pipeline.consume(sampleBuffer)
+        switch outputType {
+        case .screen:
+            pipeline.consume(sampleBuffer)
+        case .audio:
+            pipeline.consumeAudio(sampleBuffer, microphone: false)
+            return
+        case .microphone:
+            pipeline.consumeAudio(sampleBuffer, microphone: true)
+            return
+        @unknown default:
+            return
+        }
         firstFrameLock.lock()
         let anchor = anchorSent ? nil : pipeline.firstFrameAnchor()
         if anchor != nil { anchorSent = true }

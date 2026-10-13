@@ -31,6 +31,15 @@ struct RecordingView: View {
                 .disabled(viewModel.displays.isEmpty || viewModel.isBusy)
             }
 
+            HStack {
+                Toggle("System Audio", isOn: $viewModel.capturesSystemAudio)
+                Toggle("Microphone", isOn: $viewModel.capturesMicrophone)
+            }
+            .disabled(viewModel.isBusy)
+
+            Toggle("Show click effects in export", isOn: $viewModel.showsClickEffects)
+                .disabled(viewModel.isBusy)
+
             HStack(spacing: 10) {
                 Button("Start") { viewModel.startRecording() }
                     .disabled(!viewModel.canStart)
@@ -76,6 +85,11 @@ struct RecordingView: View {
                 Text("\(session.width) × \(session.height) · \(session.events.count) pointer events · \(session.droppedFrames) skipped samples")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let audio = session.audio {
+                    Text("Audio samples: system \(audio.systemAudioSamples) · mic \(audio.microphoneSamples) · skipped \(audio.systemAudioDroppedSamples + audio.microphoneDroppedSamples)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 0)

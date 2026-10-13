@@ -18,6 +18,9 @@ struct DisplayOption: Identifiable, Equatable, Sendable {
 final class RecordingViewModel {
     enum Phase { case idle, starting, recording, stopping, exporting }
     private(set) var displays: [DisplayOption] = []
+    var capturesSystemAudio = false
+    var capturesMicrophone = false
+    var showsClickEffects = true
     var selectedDisplayID: UInt32?
     private(set) var isRefreshing = false
     private(set) var refreshError: String?
@@ -97,7 +100,9 @@ final class RecordingViewModel {
                 let directory = root.appendingPathComponent("Viddeo/Recordings/\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try ZoomConfiguration().save(in: directory)
-                try await recorder.start(display: display, directory: directory)
+                try await recorder.start(display: display, directory: directory,
+                                         capturesSystemAudio: capturesSystemAudio,
+                                         capturesMicrophone: capturesMicrophone)
                 guard phase == .starting else { return }
                 activeDirectory = directory
                 phase = .recording
@@ -122,8 +127,19 @@ final class RecordingViewModel {
                 exportedURL = nil
                 phase = .idle
                 status = "Recorded \(completed.duration.formatted(.number.precision(.fractionLength(1)))) seconds. Ready to export."
-                operationError = completed.eventCaptureAvailable ? nil
-                    : "Pointer monitoring was unavailable or interrupted. Allow Viddeo in System Settings > Privacy & Security > Input Monitoring and record again to enable automatic zoom. Raw video is available."
+                var warnings: [String] = []
+                if !completed.eventCaptureAvailable {
+                    warnings.append("Pointer monitoring was unavailable or interrupted. Allow Viddeo in System Settings > Privacy & Security > Input Monitoring and record again to enable automatic zoom and click effects. Raw video is available.")
+                }
+                if let audio = completed.audio {
+                    if audio.systemAudioRequested && audio.systemAudioSamples == 0 {
+                        warnings.append("No system audio samples were recorded. Check Screen & System Audio Recording access before recording again.")
+                    }
+                    if audio.microphoneRequested && audio.microphoneSamples == 0 {
+                        warnings.append("No microphone samples were recorded. Check Microphone permission and your input device before recording again.")
+                    }
+                }
+                operationError = warnings.isEmpty ? nil : warnings.joined(separator: "\n")
             } catch {
                 phase = .idle
                 operationError = error.localizedDescription
@@ -141,10 +157,11 @@ final class RecordingViewModel {
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         phase = .exporting
         operationError = nil
-        status = "Rendering automatic zooms…"
+        status = "Rendering zooms, click effects and audio…"
         operation = Task {
             do {
-                try await exporter.export(session: session, directory: directory, destination: destination)
+                try await exporter.export(session: session, directory: directory, destination: destination,
+                                          showsClickEffects: showsClickEffects)
                 exportedURL = destination
                 status = "Export saved to \(destination.lastPathComponent)."
             } catch {
