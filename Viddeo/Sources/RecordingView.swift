@@ -38,6 +38,9 @@ struct RecordingView: View {
             }
             .disabled(viewModel.isBusy)
 
+            Toggle("Camera overlay", isOn: $viewModel.capturesWebcam)
+                .disabled(viewModel.isBusy)
+
             HStack {
                 Toggle("Smooth rendered cursor", isOn: $viewModel.rendersCursor)
                 Toggle("Hide cursor while typing", isOn: $viewModel.capturesTypingTiming)

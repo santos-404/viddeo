@@ -18,17 +18,21 @@ struct ExportEdit: Sendable {
     /// Master volume, mutes, microphone cleanup and click sounds. A configuration that would not
     /// change the audio is dropped, so the neutral case is exactly the original pass-through export.
     var audio: AudioMixConfiguration?
+    /// Overlay settings for a recorded camera; ignored for sessions without one. Nil uses the
+    /// session's `webcam-config.json`, or the observed defaults when the file is absent.
+    var webcam: WebcamConfiguration?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
-         audio: AudioMixConfiguration? = nil) {
+         audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
         self.audio = audio.flatMap { $0.isExportNeutral ? nil : $0 }
+        self.webcam = webcam
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
@@ -50,6 +54,9 @@ struct ExportEdit: Sendable {
         if let track = try CaptionTrack.load(from: directory), !track.cues.isEmpty {
             let configuration = try CaptionConfiguration.load(in: directory)
             if configuration.enabled { edit.captions = (track, configuration) }
+        }
+        if session.webcam != nil, manager.fileExists(atPath: directory.appendingPathComponent("webcam-config.json").path) {
+            edit.webcam = try WebcamConfiguration.load(in: directory)
         }
         if manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path) {
             let audio = try AudioMixConfiguration.load(in: directory)

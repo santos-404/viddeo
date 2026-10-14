@@ -45,9 +45,16 @@ final class ScreenRecorder {
     private var audioOptions = (system: false, microphone: false)
     private var cursorEmbedded = true
     private var capturesTyping = false
+    private let webcamRecorder = WebcamRecorder()
+    private var webcamActive = false
+    /// Why the last recording has no (or an incomplete) camera track; read after `start` and `stop`.
+    private(set) var webcamWarning: String?
 
+    /// The camera is optional: it starts after the screen stream, so a missing device or denied
+    /// permission never prevents or delays the screen recording, and is reported in `webcamWarning`.
     func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false,
-               rendersCursor: Bool = false, capturesKeystrokes: Bool = false) async throws {
+               rendersCursor: Bool = false, capturesKeystrokes: Bool = false,
+               capturesWebcam: Bool = false, webcamDeviceID: String? = nil) async throws {
         guard stream == nil, !isStarting, !isStopping else { throw RecorderError.alreadyRecording }
         let dimensions = try Self.captureDimensions(displayID: display.displayID)
         isStarting = true
@@ -61,6 +68,14 @@ final class ScreenRecorder {
             } else if status == .denied || status == .restricted {
                 isStarting = false
                 throw RecorderError.microphonePermissionDenied
+            }
+        }
+        webcamWarning = nil
+        var webcamAuthorized = false
+        if capturesWebcam {
+            // Asked before the stream starts so a permission prompt cannot delay the first frames.
+            do { try await WebcamRecorder.authorize(); webcamAuthorized = true } catch {
+                webcamWarning = error.localizedDescription
             }
         }
         generation &+= 1
@@ -128,6 +143,12 @@ final class ScreenRecorder {
             }
             if let pendingCaptureFailure { throw pendingCaptureFailure }
             isStarting = false
+            if webcamAuthorized {
+                do {
+                    try await webcamRecorder.start(directory: directory, epoch: nil, deviceID: webcamDeviceID)
+                    webcamActive = true
+                } catch { webcamWarning = error.localizedDescription }
+            }
         } catch {
             if let pendingStream { try? await pendingStream.stopCapture() }
             cursorRecorder.stopCapture()
@@ -153,6 +174,7 @@ final class ScreenRecorder {
             if let pendingCaptureFailure { throw pendingCaptureFailure }
             let finished = try await pipeline.finish(atHostTime: stopTime)
             if let pendingCaptureFailure { throw pendingCaptureFailure }
+            let webcam = await finishWebcam(screenFirstFrameHostSeconds: pipeline.firstFrameHostSeconds)
             let duration = finished.duration
             let events = cursorRecorder.events(through: duration)
             let session = RecordingSession(
@@ -168,18 +190,50 @@ final class ScreenRecorder {
                 audio: audioOptions.system || audioOptions.microphone ? finished.audio : nil,
                 cursorEmbedded: cursorEmbedded,
                 keystrokes: capturesTyping ? cursorRecorder.keystrokes(through: duration) : nil,
-                keystrokeCaptureAvailable: capturesTyping ? cursorRecorder.keystrokesWereAvailableForSession : nil
+                keystrokeCaptureAvailable: capturesTyping ? cursorRecorder.keystrokesWereAvailableForSession : nil,
+                webcam: webcam
             )
             clearSession(generation: stopGeneration)
             try session.save(in: directory)
             return session
         } catch {
             cursorRecorder.stopCapture()
+            await discardWebcam()
             await pipeline.drain()
             await pipeline.abort()
             clearSession(generation: stopGeneration)
             throw error
         }
+    }
+
+    /// Finalizes `camera.mov` and expresses its first frame on the screen recording's clock: both
+    /// movies are timestamped on the host clock, so the difference of their first-frame host times is
+    /// the camera's offset (negative when the camera produced a frame before the screen did).
+    private func finishWebcam(screenFirstFrameHostSeconds: Double?) async -> WebcamCaptureMetadata? {
+        guard webcamActive else { return nil }
+        webcamActive = false
+        var metadata: WebcamCaptureMetadata
+        do {
+            metadata = try await webcamRecorder.stop()
+        } catch WebcamError.deviceDisconnected(let partial?) {
+            metadata = partial
+            webcamWarning = "The camera was disconnected during the recording; the camera track ends early."
+        } catch {
+            webcamWarning = error.localizedDescription
+            return nil
+        }
+        guard let screenStart = screenFirstFrameHostSeconds, metadata.firstHostTime.isFinite else {
+            webcamWarning = "The camera could not be aligned with the screen recording."
+            return nil
+        }
+        metadata.firstPTS = metadata.firstHostTime - screenStart
+        return metadata
+    }
+
+    private func discardWebcam() async {
+        guard webcamActive else { return }
+        webcamActive = false
+        _ = try? await webcamRecorder.stop()
     }
 
     private func handleCaptureFailure(_ error: Error, generation failureGeneration: UInt64) async {
@@ -191,6 +245,7 @@ final class ScreenRecorder {
         pendingCaptureFailure = error
         isStopping = true
         cursorRecorder.stopCapture()
+        await discardWebcam()
         if let stream { try? await stream.stopCapture() }
         if let pipeline {
             await pipeline.drain()
@@ -413,6 +468,11 @@ final class ScreenWriterPipeline: @unchecked Sendable {
 
     private func countAudioDrop(_ microphone: Bool) {
         if microphone { microphoneDroppedSamples += 1 } else { systemAudioDroppedSamples += 1 }
+    }
+
+    /// Host-clock seconds of the first accepted video frame (the recording's time zero), after `finish`.
+    var firstFrameHostSeconds: Double? {
+        sampleQueue.sync { firstPTS.map { $0.seconds } }
     }
 
     func firstFrameAnchor() -> (host: CMTime, pts: CMTime)? {

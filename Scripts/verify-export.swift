@@ -194,9 +194,10 @@ struct VerifyExport {
         try await verifyGIF(session: session, directory: directory, duration: duration)
         try await verifyEdits(root: directory, width: width, height: height, duration: duration)
         try await verifyAudioMix(root: directory, width: width, height: height, duration: duration)
+        try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
 
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track); rendered cursor, typing and segment hiding.")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding.")
     }
 
     @MainActor
@@ -794,6 +795,163 @@ struct VerifyExport {
         }
     }
 
+    // MARK: Camera overlay
+
+    /// A solid-color camera movie (`flipAt` seconds: magenta before, cyan from then on), 320×240, 30 fps.
+    private static func makeCameraFixture(url: URL, duration: Double, flipAt: Double) async throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: 320, AVVideoHeightKey: 240
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: 320, kCVPixelBufferHeightKey as String: 240
+        ])
+        guard writer.canAdd(input) else { throw VerificationError.failed("cannot add camera fixture input") }
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? VerificationError.failed("camera writer did not start") }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<Int(duration * 30) {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(2)) }
+            guard let pool = adaptor.pixelBufferPool else { throw VerificationError.failed("no camera pixel buffer pool") }
+            var maybeBuffer: CVPixelBuffer?
+            guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &maybeBuffer) == kCVReturnSuccess,
+                  let buffer = maybeBuffer else { throw VerificationError.failed("could not allocate a camera frame") }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRow(buffer)
+            let cyan = Double(frame) / 30 >= flipAt
+            for y in 0..<240 {
+                for x in 0..<320 {
+                    let pixel = base + y * stride + x * 4
+                    pixel[0] = 255; pixel[1] = cyan ? 255 : 0; pixel[2] = cyan ? 0 : 255; pixel[3] = 255
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else {
+                throw writer.error ?? VerificationError.failed("camera writer rejected a frame")
+            }
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else { throw writer.error ?? VerificationError.failed("camera fixture did not finish") }
+    }
+
+    /// The camera flips magenta → cyan at camera time 1 s and starts 1 s after the screen
+    /// (`firstPTS` 1), so on the screen timeline it is magenta before 2 s (held before 1 s) and cyan after.
+    @MainActor
+    private static func verifyWebcam(root: URL, width: Int, height: Int, duration: Double) async throws {
+        let directory = root.appendingPathComponent("webcam-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try await makeFixture(url: directory.appendingPathComponent("raw.mp4"), width: width, height: height, duration: duration)
+        try await makeCameraFixture(url: directory.appendingPathComponent("camera.mov"), duration: duration, flipAt: 1)
+        let session = RecordingSession(
+            id: UUID(), createdAt: Date(), displayID: 1, width: width, height: height, duration: duration,
+            events: [], droppedFrames: 0, eventCaptureAvailable: true,
+            webcam: WebcamCaptureMetadata(filename: "camera.mov", firstPTS: 1, duration: duration, width: 320, height: 240,
+                                          droppedFrames: 0, deviceName: "Fixture", firstHostTime: 0)
+        )
+        try session.save(in: directory)
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+        let magenta = RGB(red: 255, green: 0, blue: 255), cyan = RGB(red: 0, green: 255, blue: 255)
+        // Bottom-right square: 0.35 × 1280 = 448 px, padding 0.5 × 0.1 × 448 = 22 px → center (1034, 474) of 1280×720.
+        let (px, py) = (1034.0 / 1280, 474.0 / 720)
+
+        func export(_ name: String, _ edit: ExportEdit?, settings: ExportSettings = settings) async throws -> AVURLAsset {
+            let url = directory.appendingPathComponent(name)
+            try await OfflineExporter().export(session: session, directory: directory, destination: url,
+                                               showsClickEffects: false, settings: settings, edit: edit)
+            return AVURLAsset(url: url)
+        }
+        func expect(_ asset: AVURLAsset, _ label: String, _ points: [(time: Double, color: RGB)],
+                    x: Double = px, y: Double = py) async throws {
+            for (time, color) in points {
+                let pixel = try await sampleColor(asset: asset, time: time, x: x, y: y)
+                guard pixel.matches(color, tolerance: 110) else {
+                    throw VerificationError.failed("\(label): pixel at \(time)s is \(pixel), expected \(color)")
+                }
+            }
+        }
+
+        // Plain export: held first frame before the camera starts, flip at screen time 2 s.
+        let plain = try await export("webcam-plain.mp4", nil)
+        try await expect(plain, "camera overlay", [(0.3, magenta), (1.5, magenta), (2.6, cyan), (6.0, cyan)])
+
+        // Timeline: playback [0,3) shows source 5…8 (cyan), [3,6) shows source 0…3 (magenta until 2 s, cyan after).
+        var timeline = TimelineModel(sourceDuration: duration)
+        try timeline.split(atSource: 3)
+        try timeline.split(atSource: 5)
+        let middle = timeline.segments[1].id, late = timeline.segments[2].id
+        try timeline.delete(segmentID: middle)
+        try timeline.move(segmentID: late, toIndex: 0)
+        let edited = try await export("webcam-edited.mp4", ExportEdit(timeline: timeline))
+        try await expect(edited, "camera in an edited export",
+                         [(0.5, cyan), (2.5, cyan), (3.5, magenta), (4.5, magenta), (5.5, cyan)])
+
+        // Configuration: hidden, screen-only and mirrored layouts, a moved anchor, and the full-screen camera.
+        var hidden = WebcamConfiguration()
+        hidden.hide = true
+        let hiddenAsset = try await export("webcam-hidden.mp4", ExportEdit(webcam: hidden))
+        for time in [1.5, 4.0] {
+            let pixel = try await sampleColor(asset: hiddenAsset, time: time, x: px, y: py)
+            guard !pixel.matches(magenta, tolerance: 110), !pixel.matches(cyan, tolerance: 110) else {
+                throw VerificationError.failed("hidden camera still drawn at \(time)s: \(pixel)")
+            }
+        }
+        var screenOnly = WebcamConfiguration()
+        screenOnly.layout = .screenOnly
+        let screenOnlyAsset = try await export("webcam-screen-only.mp4", ExportEdit(webcam: screenOnly))
+        let leftover = try await sampleColor(asset: screenOnlyAsset, time: 4.0, x: px, y: py)
+        guard !leftover.matches(cyan, tolerance: 110) else { throw VerificationError.failed("screen-only layout still drew the camera") }
+        var topLeft = WebcamConfiguration()
+        topLeft.position = WebcamAnchor.topLeft.point
+        let movedAsset = try await export("webcam-top-left.mp4", ExportEdit(webcam: topLeft))
+        // Top-left square: padding 22 px, so its center is (246, 246).
+        try await expect(movedAsset, "top-left camera", [(4.0, cyan)], x: 246.0 / 1280, y: 246.0 / 720)
+        let vacated = try await sampleColor(asset: movedAsset, time: 4.0, x: px, y: py)
+        guard !vacated.matches(cyan, tolerance: 110) else { throw VerificationError.failed("moved camera still drawn at the old anchor") }
+        var fullscreen = WebcamConfiguration()
+        fullscreen.layout = .fullscreenCamera
+        let fullscreenAsset = try await export("webcam-fullscreen.mp4", ExportEdit(webcam: fullscreen))
+        try await expect(fullscreenAsset, "full-screen camera", [(1.5, magenta), (4.0, cyan)], x: 0.1, y: 0.1)
+
+        // A recorded camera whose file disappeared is an error that names the fix.
+        let missing = directory.appendingPathComponent("camera.mov")
+        let moved = directory.appendingPathComponent("camera-moved.mov")
+        try FileManager.default.moveItem(at: missing, to: moved)
+        do {
+            _ = try await export("webcam-missing.mp4", nil)
+            throw VerificationError.failed("a missing camera file was silently ignored")
+        } catch let error as OfflineExporter.ExportError {
+            guard error.localizedDescription.contains("camera") else {
+                throw VerificationError.failed("missing camera error does not mention the camera: \(error.localizedDescription)")
+            }
+        }
+        _ = try await export("webcam-missing-hidden.mp4", ExportEdit(webcam: hidden))
+        try FileManager.default.moveItem(at: moved, to: missing)
+
+        // GIF: the camera is composited into frames too (second frame at ≥ 2.6 s is cyan).
+        let gifSettings = ExportSettings(format: .gif, fps: 10, height: 360, codec: .h264)
+        let gifURL = directory.appendingPathComponent("webcam.gif")
+        try await OfflineExporter().export(session: session, directory: directory, destination: gifURL,
+                                           showsClickEffects: false, settings: gifSettings, edit: nil)
+        guard let source = CGImageSourceCreateWithURL(gifURL as CFURL, nil), CGImageSourceGetCount(source) > 30,
+              let early = CGImageSourceCreateImageAtIndex(source, 8, nil), let late = CGImageSourceCreateImageAtIndex(source, 40, nil) else {
+            throw VerificationError.failed("the camera GIF has too few frames")
+        }
+        for (image, color, label) in [(early, magenta, "0.8 s"), (late, cyan, "4.0 s")] {
+            let rep = NSBitmapImageRep(cgImage: image)
+            guard let sampled = rep.colorAt(x: Int(px * Double(rep.pixelsWide)), y: Int(py * Double(rep.pixelsHigh)))?
+                .usingColorSpace(.deviceRGB) else { throw VerificationError.failed("could not read a GIF pixel") }
+            let pixel = RGB(red: UInt8(sampled.redComponent * 255), green: UInt8(sampled.greenComponent * 255),
+                            blue: UInt8(sampled.blueComponent * 255))
+            guard pixel.matches(color, tolerance: 110) else {
+                throw VerificationError.failed("GIF camera pixel at \(label) is \(pixel), expected \(color)")
+            }
+        }
+    }
+
     // MARK: Edits (timeline, audio, stage, captions)
 
     /// A separate session with no cursor events (so no zoom or click rings) and time-varying
@@ -1168,10 +1326,11 @@ private struct RGB: CustomStringConvertible {
 
     var description: String { "rgb(\(red),\(green),\(blue))" }
 
-    func matches(_ other: RGB) -> Bool {
-        abs(Int(red) - Int(other.red)) < 75
-            && abs(Int(green) - Int(other.green)) < 75
-            && abs(Int(blue) - Int(other.blue)) < 75
+    /// Saturated colors shift after YCbCr encoding, so camera checks use a looser tolerance.
+    func matches(_ other: RGB, tolerance: Int = 75) -> Bool {
+        abs(Int(red) - Int(other.red)) < tolerance
+            && abs(Int(green) - Int(other.green)) < tolerance
+            && abs(Int(blue) - Int(other.blue)) < tolerance
     }
 }
 

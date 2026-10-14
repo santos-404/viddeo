@@ -34,6 +34,8 @@ struct RecordingSession: Codable, Sendable {
     var cursorEmbedded: Bool? = nil
     var keystrokes: [KeystrokeEvent]? = nil
     var keystrokeCaptureAvailable: Bool? = nil
+    /// Present when a camera was recorded next to the screen (`camera.mov`); absent on older sessions.
+    var webcam: WebcamCaptureMetadata? = nil
 
     func save(in directory: URL) throws {
         let encoder = JSONEncoder()
@@ -56,4 +58,20 @@ struct AudioCaptureMetadata: Codable, Sendable, Equatable {
     var microphoneDroppedSamples: Int
     var systemAudioTrackName = "System Audio"
     var microphoneTrackName = "Microphone"
+}
+
+/// Sidecar description of `camera.mov`. `firstPTS` is seconds from the screen recording's
+/// first-frame epoch (host clock) to the first camera frame; it is never below
+/// `-WebcamRecorder.epochTolerance`. Without an epoch it is 0 and `firstHostTime` alone
+/// anchors the file.
+struct WebcamCaptureMetadata: Codable, Sendable, Equatable {
+    var filename: String
+    var firstPTS: Double
+    var duration: Double
+    var width: Int
+    var height: Int
+    var droppedFrames: Int
+    var deviceName: String
+    /// Host-clock seconds of the first written frame, for alignment done after recording.
+    var firstHostTime: Double
 }

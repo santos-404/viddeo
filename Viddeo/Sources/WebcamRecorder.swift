@@ -2,22 +2,6 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// Sidecar description of `camera.mov`. `firstPTS` is seconds from the screen recording's
-/// first-frame epoch (host clock) to the first camera frame; it is never below
-/// `-WebcamRecorder.epochTolerance`. Without an epoch it is 0 and `firstHostTime` alone
-/// anchors the file.
-struct WebcamCaptureMetadata: Codable, Sendable, Equatable {
-    var filename: String
-    var firstPTS: Double
-    var duration: Double
-    var width: Int
-    var height: Int
-    var droppedFrames: Int
-    var deviceName: String
-    /// Host-clock seconds of the first written frame, for alignment done after recording.
-    var firstHostTime: Double
-}
-
 /// Records the camera (video only) to HEVC `camera.mov` with `AVCaptureVideoDataOutput` and
 /// `AVAssetWriter`, keeping host-clock timing so the exporter can align it with the screen.
 ///
@@ -64,7 +48,8 @@ final class WebcamRecorder: @unchecked Sendable {
         }
     }
 
-    private static func authorize() async throws {
+    /// Prompts for camera access when undetermined; throws `permissionDenied` otherwise.
+    static func authorize() async throws {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             return

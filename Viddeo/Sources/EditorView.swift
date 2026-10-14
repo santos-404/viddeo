@@ -23,6 +23,7 @@ struct EditorView: View {
                 stage.tabItem { Text("Background") }
                 captions.tabItem { Text("Captions") }
                 audio.tabItem { Text("Audio") }
+                if editor.session.webcam != nil { camera.tabItem { Text("Camera") } }
             }
             .frame(minHeight: 300)
             if editor.isWorking { ProgressView().controlSize(.small) }
@@ -198,6 +199,52 @@ struct EditorView: View {
             }
             .disabled(editor.state.audio.clickSoundEffect == nil)
             Text("Applied to MP4 exports: cleanup replaces the exported microphone track, click sounds add a separate track. Cleanup is viddeo's own DSP, not Screen Studio's model.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }.padding(12)
+    }
+
+    private var camera: some View {
+        let hasMicrophone = editor.session.audio?.microphoneSamples ?? 0 > 0
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Toggle("Show camera", isOn: Binding(get: { !editor.state.webcam.hide }, set: { shown in
+                    editor.edit { $0.webcam.hide = !shown }
+                }))
+                Toggle("Mirror", isOn: Binding(get: { editor.state.webcam.mirror }, set: { mirrored in
+                    editor.edit { $0.webcam.mirror = mirrored }
+                }))
+            }
+            Picker("Layout", selection: Binding(get: { editor.state.webcam.layout }, set: { layout in
+                editor.edit { $0.webcam.layout = layout }
+            })) {
+                Text("Overlay").tag(WebcamLayout.cameraOverlay)
+                Text("Full-screen camera").tag(WebcamLayout.fullscreenCamera)
+                Text("Screen only").tag(WebcamLayout.screenOnly)
+            }
+            Picker("Position", selection: Binding(get: { editor.state.webcam.anchor }, set: { anchor in
+                editor.edit { $0.webcam.position = anchor.point }
+            })) {
+                ForEach(WebcamAnchor.allCases, id: \.self) { anchor in Text(anchor.rawValue).tag(anchor) }
+            }
+            Picker("Shape", selection: Binding(get: { editor.state.webcam.shape }, set: { shape in
+                editor.edit { $0.webcam.shape = shape }
+            })) {
+                Text("Rounded").tag(WebcamShape.roundedRect)
+                Text("Circle").tag(WebcamShape.circle)
+            }
+            HStack {
+                Text("Size").frame(width: 60, alignment: .leading)
+                Slider(value: Binding(get: { editor.state.webcam.sizeRatio }, set: { value in
+                    editor.edit({ $0.webcam.sizeRatio = value }, key: "camera-size")
+                }), in: 0.1...0.6)
+                Text(editor.state.webcam.sizeRatio.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+            }
+            Toggle("Hide while silent (2 s or longer)", isOn: Binding(get: { editor.state.webcam.hideDuringSilenceMs != nil }, set: { on in
+                editor.edit { $0.webcam.hideDuringSilenceMs = on ? 2_000 : nil }
+            }))
+            .disabled(!hasMicrophone)
+            Text("The camera is composited into MP4 and GIF exports at the position and size shown here.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.padding(12)

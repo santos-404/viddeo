@@ -9,6 +9,7 @@ struct EditorState: Sendable, Equatable {
     var captions: CaptionTrack
     var captionConfiguration: CaptionConfiguration
     var audio: AudioMixConfiguration
+    var webcam: WebcamConfiguration
 }
 
 @MainActor
@@ -39,7 +40,8 @@ final class EditorModel {
             captions: try CaptionTrack.load(from: directory) ?? CaptionTrack(locale: "en-US", cues: []),
             captionConfiguration: try CaptionConfiguration.load(in: directory),
             audio: manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path)
-                ? try AudioMixConfiguration.load(in: directory) : .editorDefault)
+                ? try AudioMixConfiguration.load(in: directory) : .editorDefault,
+            webcam: try WebcamConfiguration.load(in: directory))
         self.session = session
         self.directory = directory
         self.project = project
@@ -58,7 +60,7 @@ final class EditorModel {
         ExportEdit(timeline: state.timeline, stage: state.stageEnabled ? state.stage : nil,
                    captions: state.captionConfiguration.enabled && !state.captions.cues.isEmpty
                     ? (state.captions, state.captionConfiguration) : nil,
-                   audio: state.audio)
+                   audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam)
     }
 
     /// Failed edits leave both state and history intact.
@@ -72,6 +74,7 @@ final class EditorModel {
             try candidate.captions.validate()
             try candidate.captionConfiguration.validate()
             try candidate.audio.validate()
+            try candidate.webcam.validate()
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
             reconcileSelection()
@@ -106,6 +109,7 @@ final class EditorModel {
             try state.captions.save(to: directory)
             try state.captionConfiguration.save(in: directory)
             try state.audio.save(in: directory)
+            if session.webcam != nil { try state.webcam.save(in: directory) }
             try updated.save(to: directory)
             project = updated
             savedState = state

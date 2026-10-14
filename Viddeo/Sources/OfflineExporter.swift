@@ -137,7 +137,7 @@ final class OfflineExporter {
         }
         let outputSize = CGSize(width: size.width, height: size.height)
         let cursorConfiguration = session.cursorEmbedded == false ? try CursorConfiguration.load(in: directory) : nil
-        let renderer = ExportFrameRenderer(
+        var renderer = ExportFrameRenderer(
             sourceWidth: session.width, sourceHeight: session.height,
             outputWidth: size.width, outputHeight: size.height,
             timeline: ZoomTimeline(session: session, configuration: zoomConfiguration),
@@ -154,6 +154,14 @@ final class OfflineExporter {
                 CursorRenderer(configuration: $0, outputSize: CGSize(width: session.width, height: session.height))
             }
         )
+        if session.webcam != nil {
+            let configuration = try edit?.webcam ?? WebcamConfiguration.load(in: directory)
+            let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
+                ?? renderer.contentRect
+            renderer.webcam = try await WebcamExportPlan.make(
+                session: session, directory: sessionDirectory, configuration: configuration,
+                outputSize: outputSize, contentRect: contentRect)
+        }
         // The output runs in playback time; without a timeline that is the recording itself.
         let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
         let frameCount = ExportFrameRenderer.frameCount(duration: outputDuration.seconds, fps: settings.fps)
@@ -216,6 +224,8 @@ final class OfflineExporter {
         let asset = AVURLAsset(url: source)
         let timeRange = CMTimeRange(start: .zero, duration: sourceDuration)
         let frames = try await ExportFrameSource(asset: asset, duration: sourceDuration, timeline: renderer.edit)
+        var cameraFrames: WebcamFrameSource?
+        if let plan = renderer.webcam { cameraFrames = try await WebcamFrameSource(plan: plan, timeline: renderer.edit) }
         let writer = try AVAssetWriter(outputURL: destination, fileType: .mp4)
         writer.shouldOptimizeForNetworkUse = true
 
@@ -293,6 +303,7 @@ final class OfflineExporter {
 
         func cancelAll() {
             frames.cancel()
+            cameraFrames?.cancel()
             for track in audio { track.cancel() }
             writer.cancelWriting()
         }
@@ -330,7 +341,8 @@ final class OfflineExporter {
                           let buffer = maybeBuffer else {
                         throw ExportError.encodingFailed("could not allocate an output frame")
                     }
-                    context.render(renderer.image(source: sourceImage, at: sourceTime), to: buffer,
+                    let camera = try cameraFrames?.image(atSource: sourceTime)
+                    context.render(renderer.image(source: sourceImage, at: sourceTime, camera: camera), to: buffer,
                                    bounds: renderer.outputRect, colorSpace: colorSpace)
                     guard adaptor.append(buffer, withPresentationTime: time) else {
                         throw ExportError.encodingFailed(writer.error?.localizedDescription ?? "a video frame was rejected")
@@ -396,6 +408,7 @@ struct ExportFrameRenderer: Sendable {
     var sourceDuration: Double = .infinity
     var cursorTimeline: CursorTimeline? = nil
     var cursorRenderer: CursorRenderer? = nil
+    var webcam: WebcamExportPlan? = nil
 
     /// Identity without a timeline, so the unedited export samples exactly as before.
     func sourceTime(forPlaybackTime time: Double) -> Double {
@@ -420,7 +433,9 @@ struct ExportFrameRenderer: Sendable {
                       width: width, height: height)
     }
 
-    func image(source rawSource: CIImage, at time: Double) -> CIImage {
+    /// `camera` is the camera frame for `time` (see `WebcamFrameSource`); it is composited over the
+    /// staged frame, under the captions, when a webcam plan is present.
+    func image(source rawSource: CIImage, at time: Double, camera: CIImage? = nil) -> CIImage {
         let frame = timeline.frame(at: time)
         let width = CGFloat(sourceWidth), height = CGFloat(sourceHeight)
 
@@ -466,7 +481,7 @@ struct ExportFrameRenderer: Sendable {
                 ])
                 : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
             let staged = stage.compose(resized.cropped(to: CGRect(origin: .zero, size: size)))
-            return withCaptions(staged, at: time).cropped(to: outputRect)
+            return withCaptions(withWebcam(staged, camera: camera, at: time), at: time).cropped(to: outputRect)
         }
 
         // One resample maps the crop straight into the fitted content rectangle.
@@ -483,7 +498,19 @@ struct ExportFrameRenderer: Sendable {
             .transformed(by: CGAffineTransform(translationX: content.minX, y: content.minY))
             .cropped(to: content)
         let background = CIImage(color: .black).cropped(to: outputRect)
-        return withCaptions(placed.composited(over: background), at: time).cropped(to: outputRect)
+        return withCaptions(withWebcam(placed.composited(over: background), camera: camera, at: time), at: time)
+            .cropped(to: outputRect)
+    }
+
+    /// The overlay is positioned in output space; hide-during-silence reads source-time milliseconds,
+    /// like caption cues. The fullscreen layout replaces the screen with the camera.
+    private func withWebcam(_ frame: CIImage, camera: CIImage?, at sourceTime: Double) -> CIImage {
+        guard let webcam, let camera else { return frame }
+        if webcam.overlay.configuration.layout == .fullscreenCamera { return webcam.overlay.fullscreen(camera: camera) }
+        guard let overlay = webcam.overlay.image(camera: camera, atMs: sourceTime * 1000, chunks: webcam.chunks) else {
+            return frame
+        }
+        return overlay.composited(over: frame)
     }
 
     /// Caption cues are source-time milliseconds, like zoom and click data.

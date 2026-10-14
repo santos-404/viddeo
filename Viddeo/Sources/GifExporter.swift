@@ -50,6 +50,9 @@ enum GifExporter {
             : try await asset.load(.duration)
         let frames = try await ExportFrameSource(asset: asset, duration: sourceDuration, timeline: renderer.edit)
         defer { frames.cancel() }
+        var cameraFrames: WebcamFrameSource?
+        if let plan = renderer.webcam { cameraFrames = try await WebcamFrameSource(plan: plan, timeline: renderer.edit) }
+        defer { cameraFrames?.cancel() }
         guard let gif = CGImageDestinationCreateWithURL(destination as CFURL, UTType.gif.identifier as CFString,
                                                         frameCount, nil) else {
             throw OfflineExporter.ExportError.unsupportedOutput("ImageIO cannot create a GIF here")
@@ -73,7 +76,8 @@ enum GifExporter {
                 throw OfflineExporter.ExportError.encodingFailed("the raw recording has no decodable frames")
             }
             try autoreleasepool {
-                guard let frame = context.createCGImage(renderer.image(source: sourceImage, at: time),
+                let camera = try cameraFrames?.image(atSource: time)
+                guard let frame = context.createCGImage(renderer.image(source: sourceImage, at: time, camera: camera),
                                                         from: renderer.outputRect, format: .RGBA8,
                                                         colorSpace: colorSpace) else {
                     throw OfflineExporter.ExportError.encodingFailed("could not render GIF frame \(index)")

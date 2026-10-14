@@ -13,7 +13,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/CursorRecorder.swift \
-  Viddeo/Sources/ScreenRecorder.swift Scripts/verify-capture.swift \
+  Viddeo/Sources/ScreenRecorder.swift Viddeo/Sources/WebcamRecorder.swift Viddeo/Sources/WebcamOverlay.swift Scripts/verify-capture.swift \
   -o .build/verify-capture
 .build/verify-capture
 
@@ -22,6 +22,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift Viddeo/Sources/SilenceDetector.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
   Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Scripts/verify-export.swift \
@@ -30,7 +31,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/CursorRecorder.swift \
-  Viddeo/Sources/ScreenRecorder.swift Scripts/verify-audio.swift \
+  Viddeo/Sources/ScreenRecorder.swift Viddeo/Sources/WebcamRecorder.swift Viddeo/Sources/WebcamOverlay.swift Scripts/verify-audio.swift \
   -o .build/verify-audio
 .build/verify-audio
 
@@ -91,6 +92,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift Viddeo/Sources/EditHistory.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
   Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \

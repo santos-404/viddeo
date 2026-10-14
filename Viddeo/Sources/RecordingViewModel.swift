@@ -23,6 +23,7 @@ final class RecordingViewModel {
     var showsClickEffects = true
     var rendersCursor = true
     var capturesTypingTiming = false
+    var capturesWebcam = false
     var selectedDisplayID: UInt32?
     private(set) var isRefreshing = false
     private(set) var refreshError: String?
@@ -144,11 +145,15 @@ final class RecordingViewModel {
                 try await recorder.start(display: display, directory: directory,
                                          capturesSystemAudio: capturesSystemAudio,
                                          capturesMicrophone: capturesMicrophone,
-                                         rendersCursor: rendersCursor, capturesKeystrokes: rendersCursor && capturesTypingTiming)
+                                         rendersCursor: rendersCursor, capturesKeystrokes: rendersCursor && capturesTypingTiming,
+                                         capturesWebcam: capturesWebcam)
                 guard phase == .starting else { return }
                 activeDirectory = directory
                 phase = .recording
                 status = "Recording display \(selectedDisplayID). Click around, then press Stop."
+                if let warning = recorder.webcamWarning {
+                    operationError = "Recording without the camera: \(warning)"
+                }
             } catch {
                 phase = .idle
                 operationError = error.localizedDescription
@@ -183,6 +188,7 @@ final class RecordingViewModel {
                         warnings.append("No microphone samples were recorded. Check Microphone permission and your input device before recording again.")
                     }
                 }
+                if let webcamWarning = recorder.webcamWarning { warnings.append(webcamWarning) }
                 if let presetError { warnings.append(presetError) }
                 if let editorError { warnings.append(editorError) }
                 if completed.keystrokeCaptureAvailable == false {

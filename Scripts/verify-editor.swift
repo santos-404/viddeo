@@ -67,6 +67,29 @@ struct VerifyEditor {
         try check(try AudioMixConfiguration.load(in: directory) == withAudio.audio, "audio-config.json roundtrip")
         try check(try ExportEdit.load(from: directory, session: session).audio == withAudio.audio, "sidecar loader reads audio")
         try check(try EditorModel(session: session, directory: directory).state.audio == withAudio.audio, "reopened editor keeps audio")
+        // Camera: sessions without one never export or save overlay settings; sessions with one do.
+        try check(reopened.exportEdit.webcam == nil, "no camera, no overlay settings")
+        try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("webcam-config.json").path), "no camera, no webcam-config.json")
+        let cameraDirectory = directory.appendingPathComponent("with-camera", isDirectory: true)
+        try FileManager.default.createDirectory(at: cameraDirectory, withIntermediateDirectories: true)
+        var cameraSession = session
+        cameraSession.webcam = WebcamCaptureMetadata(filename: "camera.mov", firstPTS: 0.25, duration: 7.5, width: 1280, height: 720,
+                                                     droppedFrames: 0, deviceName: "Fixture", firstHostTime: 100)
+        try cameraSession.save(in: cameraDirectory)
+        let cameraEditor = try EditorModel(session: cameraSession, directory: cameraDirectory)
+        try check(cameraEditor.exportEdit.webcam == WebcamConfiguration(), "camera session exports the default overlay")
+        cameraEditor.edit { $0.webcam.hide = true; $0.webcam.position = WebcamAnchor.topLeft.point }
+        try check(cameraEditor.exportEdit.webcam?.hide == true && cameraEditor.exportEdit.webcam?.anchor == .topLeft, "unsaved camera settings reach the export")
+        let withCamera = cameraEditor.state
+        cameraEditor.edit { $0.webcam.sizeRatio = 5 }
+        try check(cameraEditor.state == withCamera && cameraEditor.error != nil, "invalid camera size rolls back")
+        cameraEditor.undo()
+        try check(cameraEditor.state.webcam == WebcamConfiguration(), "camera undo")
+        cameraEditor.redo()
+        try check(cameraEditor.save(presetID: "custom-preset"), "camera settings saved")
+        try check(try WebcamConfiguration.load(in: cameraDirectory) == withCamera.webcam, "webcam-config.json roundtrip")
+        try check(try ExportEdit.load(from: cameraDirectory, session: cameraSession).webcam == withCamera.webcam, "sidecar loader reads the camera settings")
+        try check(try EditorModel(session: cameraSession, directory: cameraDirectory).state.webcam == withCamera.webcam, "reopened editor keeps the camera settings")
         let bytes = try Data(contentsOf: directory.appendingPathComponent("session.json"))
         reopened.edit { try $0.timeline.trim(segmentID: $0.timeline.segments[0].id, newStart: 1, newEnd: 3) }
         try check(reopened.save(presetID: "custom-preset"), "trim saved")
