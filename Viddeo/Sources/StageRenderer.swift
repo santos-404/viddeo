@@ -20,6 +20,7 @@ struct StageRenderer: Sendable {
     let background: CIImage
     private let context: CIContext
     private let cache = PreparedStageCache()
+    private let paneCache = PreparedPanesCache()
 
     init(style: StageStyle, outputSize: CGSize, baseDirectory: URL? = nil) throws {
         try style.validate()
@@ -116,46 +117,127 @@ struct StageRenderer: Sendable {
         let bounds = CGRect(origin: .zero, size: outputSize)
         let aspect = contentSize.height > 0 ? Double(contentSize.width / contentSize.height) : 0
         let rect = stageRect(contentAspect: aspect)
-        let scale = Double(outputSize.height) / StageStyle.referenceHeight
-        let radius = min(style.cornerRadius * scale, Double(min(rect.width, rect.height)) / 2)
+        let radius = cornerRadius(for: rect)
         let mask = Self.roundedRect(rect, radius: radius, color: CIColor(red: 1, green: 1, blue: 1))
 
         var backdrop = background
-        let shadow = style.shadow
-        if shadow.intensity > 0 {
-            let angle = shadow.angle * .pi / 180
-            let distance = shadow.isDirectional ? shadow.distance * scale : 0
-            // Top-left-origin offset (cos, sin) becomes (cos, -sin) with Core Image's y-up origin.
-            var shape = Self.roundedRect(rect, radius: radius,
-                                         color: CIColor(red: 0, green: 0, blue: 0, alpha: shadow.intensity))
-                .transformed(by: CGAffineTransform(translationX: distance * cos(angle),
-                                                   y: -distance * sin(angle)))
-            let sigma = 8 * shadow.blur * scale
-            if sigma > 0 { shape = shape.applyingGaussianBlur(sigma: sigma) }
+        if let shape = shadowShape(for: rect, radius: radius) {
             backdrop = shape.cropped(to: bounds).composited(over: background)
             if let baked = context.createCGImage(backdrop, from: bounds, format: .RGBA8, colorSpace: Self.sRGB) {
                 backdrop = CIImage(cgImage: baked)
             }
         }
+        return PreparedStage(bounds: bounds, contentRect: rect, backdrop: backdrop, mask: mask,
+                             border: borderImage(for: rect, radius: radius))
+    }
 
-        var border: CIImage?
-        if style.inset.size > 0, let rgba = StageStyle.rgba(hex: style.inset.color) {
-            let width = min(style.inset.size * scale, Double(min(rect.width, rect.height)) / 2)
-            let color = CIColor(red: rgba.red, green: rgba.green, blue: rgba.blue,
-                                alpha: rgba.alpha * style.inset.alpha, colorSpace: Self.sRGB)
-                ?? CIColor(red: 0, green: 0, blue: 0, alpha: style.inset.alpha)
-            let outer = Self.roundedRect(rect, radius: radius, color: color)
-            let innerRect = rect.insetBy(dx: width, dy: width)
-            if innerRect.width > 0, innerRect.height > 0 {
-                let inner = Self.roundedRect(innerRect, radius: max(0, radius - width),
-                                             color: CIColor(red: 1, green: 1, blue: 1))
-                border = outer.applyingFilter("CISourceOutCompositing",
-                                              parameters: [kCIInputBackgroundImageKey: inner])
-            } else {
-                border = outer
+    // MARK: - Per-rect decoration (shared by the single-content stage and the split-screen panes)
+
+    private var scale: Double { Double(outputSize.height) / StageStyle.referenceHeight }
+
+    /// The stage corner radius for a content rect, clamped to half its shorter side.
+    private func cornerRadius(for rect: CGRect) -> Double {
+        min(style.cornerRadius * scale, Double(min(rect.width, rect.height)) / 2)
+    }
+
+    /// The blurred, offset shadow of a content rect (not yet cropped to the output); nil without a shadow.
+    private func shadowShape(for rect: CGRect, radius: Double) -> CIImage? {
+        let shadow = style.shadow
+        guard shadow.intensity > 0 else { return nil }
+        let angle = shadow.angle * .pi / 180
+        let distance = shadow.isDirectional ? shadow.distance * scale : 0
+        // Top-left-origin offset (cos, sin) becomes (cos, -sin) with Core Image's y-up origin.
+        var shape = Self.roundedRect(rect, radius: radius,
+                                     color: CIColor(red: 0, green: 0, blue: 0, alpha: shadow.intensity))
+            .transformed(by: CGAffineTransform(translationX: distance * cos(angle),
+                                               y: -distance * sin(angle)))
+        let sigma = 8 * shadow.blur * scale
+        if sigma > 0 { shape = shape.applyingGaussianBlur(sigma: sigma) }
+        return shape
+    }
+
+    /// The inset border ring drawn inside a content rect's edge; nil when the border is off.
+    private func borderImage(for rect: CGRect, radius: Double) -> CIImage? {
+        guard style.inset.size > 0, let rgba = StageStyle.rgba(hex: style.inset.color) else { return nil }
+        let width = min(style.inset.size * scale, Double(min(rect.width, rect.height)) / 2)
+        let color = CIColor(red: rgba.red, green: rgba.green, blue: rgba.blue,
+                            alpha: rgba.alpha * style.inset.alpha, colorSpace: Self.sRGB)
+            ?? CIColor(red: 0, green: 0, blue: 0, alpha: style.inset.alpha)
+        let outer = Self.roundedRect(rect, radius: radius, color: color)
+        let innerRect = rect.insetBy(dx: width, dy: width)
+        guard innerRect.width > 0, innerRect.height > 0 else { return outer }
+        let inner = Self.roundedRect(innerRect, radius: max(0, radius - width),
+                                     color: CIColor(red: 1, green: 1, blue: 1))
+        return outer.applyingFilter("CISourceOutCompositing", parameters: [kCIInputBackgroundImageKey: inner])
+    }
+
+    // MARK: - Split-screen panes
+
+    /// One decorated content rect of a split-screen frame. `content` is already placed in `rect` (any extent that
+    /// covers it). A pane with a `deviceArea` is drawn inside the stage's device frame fitted to that area (`rect` is
+    /// then the device's screen aperture, see `deviceScreenRect(in:)`); every other pane gets the rounded mask, shadow
+    /// and inset border of the single-content stage.
+    struct Pane {
+        var rect: CGRect
+        var content: CIImage
+        var deviceArea: CGRect? = nil
+    }
+
+    /// The device's screen aperture when the stage has a device frame and it is fitted into `area`; nil otherwise.
+    func deviceScreenRect(in area: CGRect) -> CGRect? {
+        guard let frame = DeviceFrameRenderer(configuration: style.deviceMockup) else { return nil }
+        return frame.apertureRect(in: frame.fittedRect(in: area))
+    }
+
+    /// Background, then every pane with the same treatment `compose` gives the single content. Per-pane shadows
+    /// are baked into one backdrop that is cached while the pane rects stay the same.
+    func compose(panes: [Pane]) -> CIImage {
+        let bounds = CGRect(origin: .zero, size: outputSize)
+        let prepared = preparedPanes(for: panes)
+        var result = prepared.backdrop
+        let frame = DeviceFrameRenderer(configuration: style.deviceMockup)
+        for (index, pane) in panes.enumerated() {
+            if let area = pane.deviceArea, let frame {
+                // Device owns screen rounding and bezel; compose expects the screen at the origin.
+                let screen = pane.content.transformed(by: CGAffineTransform(translationX: -pane.rect.minX, y: -pane.rect.minY))
+                    .cropped(to: CGRect(origin: .zero, size: pane.rect.size))
+                result = frame.compose(screen, in: area, shadowIntensity: style.shadow.intensity,
+                                       shadowDistance: style.shadow.isDirectional ? style.shadow.distance * scale : 0,
+                                       shadowAngle: style.shadow.angle, shadowBlur: style.shadow.blur * scale)
+                    .composited(over: result)
+                continue
+            }
+            let decoration = prepared.decorations[index]
+            result = pane.content.cropped(to: pane.rect)
+                .applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: decoration.mask])
+                .composited(over: result)
+            if let border = decoration.border { result = border.composited(over: result) }
+        }
+        return result.cropped(to: bounds)
+    }
+
+    private func preparedPanes(for panes: [Pane]) -> PreparedPanes {
+        let key = panes.map { PaneKey(rect: $0.rect, deviceArea: $0.deviceArea) }
+        if let cached = paneCache.panes(for: key) { return cached }
+        let bounds = CGRect(origin: .zero, size: outputSize)
+        var backdrop = background
+        var shadowed = false
+        var decorations: [PreparedPanes.Decoration] = []
+        for pane in panes {
+            let radius = cornerRadius(for: pane.rect)
+            decorations.append(.init(mask: Self.roundedRect(pane.rect, radius: radius, color: CIColor(red: 1, green: 1, blue: 1)),
+                                     border: borderImage(for: pane.rect, radius: radius)))
+            if pane.deviceArea == nil, let shape = shadowShape(for: pane.rect, radius: radius) {
+                backdrop = shape.cropped(to: bounds).composited(over: backdrop)
+                shadowed = true
             }
         }
-        return PreparedStage(bounds: bounds, contentRect: rect, backdrop: backdrop, mask: mask, border: border)
+        if shadowed, let baked = context.createCGImage(backdrop, from: bounds, format: .RGBA8, colorSpace: Self.sRGB) {
+            backdrop = CIImage(cgImage: baked)
+        }
+        let prepared = PreparedPanes(backdrop: backdrop, decorations: decorations)
+        paneCache.store(prepared, for: key)
+        return prepared
     }
 
     private static let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
@@ -297,6 +379,36 @@ struct PreparedStage: @unchecked Sendable {
         var result = placed.composited(over: backdrop)
         if let border { result = border.composited(over: result) }
         return result.cropped(to: bounds)
+    }
+}
+
+/// Backdrop (background plus pane shadows) and per-pane mask and border for one set of pane rects.
+struct PreparedPanes: @unchecked Sendable {
+    // @unchecked: CIImage values are immutable recipes and safe to share across threads.
+    struct Decoration {
+        let mask: CIImage
+        let border: CIImage?
+    }
+
+    let backdrop: CIImage
+    let decorations: [Decoration]
+}
+
+struct PaneKey: Equatable, Sendable {
+    let rect: CGRect
+    let deviceArea: CGRect?
+}
+
+private final class PreparedPanesCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entry: (key: [PaneKey], panes: PreparedPanes)?
+
+    func panes(for key: [PaneKey]) -> PreparedPanes? {
+        lock.withLock { entry?.key == key ? entry?.panes : nil }
+    }
+
+    func store(_ panes: PreparedPanes, for key: [PaneKey]) {
+        lock.withLock { entry = (key, panes) }
     }
 }
 

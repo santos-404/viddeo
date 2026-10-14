@@ -22,6 +22,7 @@ final class CursorRecorder {
         tapWasAvailableAtStart && !storage.isTapDisabled && !storage.didOverflow
     }
 
+
     func start(displayID: CGDirectDisplayID, capturesKeystrokes: Bool = false, capturesShortcuts: Bool = false) {
         stopTap()
         self.capturesKeystrokes = capturesKeystrokes

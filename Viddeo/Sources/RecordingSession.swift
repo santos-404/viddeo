@@ -10,6 +10,32 @@ struct CursorEvent: Codable, Sendable, Equatable {
     var kind: Kind
 }
 
+/// System cursor shapes Viddeo can draw. These are renderable session values; recording does not
+/// currently capture other apps' cursor type because public AppKit cursor state is app-scoped.
+enum CursorKind: String, Codable, Sendable, CaseIterable {
+    case arrow, iBeam, iBeamVertical, pointingHand, openHand, closedHand
+    case resizeHorizontal, resizeVertical, resizeDiagonalNWSE, resizeDiagonalNESW
+    case crosshair, notAllowed, wait
+}
+
+/// A cursor shape change: `kind` is shown from `time` (seconds from the first video frame) until the next event.
+struct CursorTypeEvent: Codable, Sendable, Equatable {
+    var time: Double
+    var kind: CursorKind
+}
+
+enum CursorTypeCapture {
+    /// Change-only recording: a sample is kept when its kind differs from the previous kept one
+    /// (the first sample always is). Non-finite times are skipped.
+    static func changes(from samples: [(time: Double, kind: CursorKind)]) -> [CursorTypeEvent] {
+        var result: [CursorTypeEvent] = []
+        for sample in samples where sample.time.isFinite && sample.kind != result.last?.kind {
+            result.append(CursorTypeEvent(time: sample.time, kind: sample.kind))
+        }
+        return result
+    }
+}
+
 /// Only timing is retained, never key codes or text. Capture is opt-in.
 struct KeystrokeEvent: Codable, Sendable, Equatable {
     enum Kind: String, Codable, Sendable { case keyDown }
@@ -110,6 +136,10 @@ struct RecordingSession: Codable, Sendable {
     /// and when "Record keyboard shortcuts" was off.
     var shortcuts: [ShortcutEvent]? = nil
     var shortcutCaptureAvailable: Bool? = nil
+    /// Cursor shape changes (see `CursorTypeCapture`); absent on older sessions, which draw the arrow throughout.
+    var cursorTypes: [CursorTypeEvent]? = nil
+    /// False when the system cursor image could not be read (best effort: arrow only).
+    var cursorTypeCaptureAvailable: Bool? = nil
     /// Present when a camera was recorded next to the screen (`camera.mov`); absent on older sessions.
     var webcam: WebcamCaptureMetadata? = nil
 

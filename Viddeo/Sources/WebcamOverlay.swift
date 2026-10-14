@@ -131,8 +131,9 @@ struct CutoutCameraOptions: Codable, Sendable, Equatable {
     var positionX = 1.0
     /// Side of the square the cutout fits in, as a fraction of the area's shorter side.
     var sizeRatio = 0.5
-    /// Multiplier on the size while the screen is zoomed in. How the original applies it over time is
-    /// UNKNOWN; viddeo blends from 1 (unzoomed) to this value as the zoom scale goes from 1 to 2.
+    /// Observed multiplier for the zoomed camera rectangle. Whether the original switches at the
+    /// start or end of a screen-moving range is unknown; Viddeo selects the zoomed rectangle as soon
+    /// as the zoom timeline leaves 1× and does not invent a size interpolation curve.
     var zoomedScale = 0.8
     /// nil follows the camera's own aspect.
     var aspectRatio: WebcamAspectRatio? = nil
@@ -466,6 +467,8 @@ struct WebcamOverlay: Sendable {
         var camera: CGRect?
         /// Corner radius of the split panes (clamped per rect when drawn); 0 elsewhere.
         var paneRadius: Double
+        /// The whole screen pane of the split layout (the screen is fitted inside it); nil elsewhere.
+        var screenPane: CGRect? = nil
     }
 
     /// Resolves `layout` for the canvas: `sourceAspect` is the screen recording's width / height, `cameraAspect`
@@ -485,7 +488,7 @@ struct WebcamOverlay: Sendable {
         case .splitScreen:
             let panes = splitPanes()
             return ResolvedLayout(layout: layout, screen: Self.fit(aspect: sourceAspect, in: panes.screen),
-                                  camera: panes.camera, paneRadius: paneCornerRadius)
+                                  camera: panes.camera, paneRadius: paneCornerRadius, screenPane: panes.screen)
         }
     }
 
@@ -513,14 +516,14 @@ struct WebcamOverlay: Sendable {
         return options.flip ? (screen: secondRect, camera: firstRect) : (screen: firstRect, camera: secondRect)
     }
 
-    /// Cutout rect: a square of `min(area) × sizeRatio × scale` (scale blends to `zoomedScale` as the screen zooms from
-    /// 1× to 2×), the camera's aspect fitted inside it, at `positionX` along the area and on its bottom edge.
+    /// Cutout rect: a square of `min(area) × sizeRatio`, or `zoomedScale` times that size for any zoom above 1×;
+    /// the camera's aspect is fitted inside it, at `positionX` along the area and on its bottom edge.
     func cutoutRect(cameraAspect: Double, zoomScale: Double = 1) -> CGRect {
         let options = configuration.cutout
         let fallback = cameraAspect.isFinite && cameraAspect > 0 ? min(10, max(0.1, cameraAspect)) : 1
         let aspect = options.aspectRatio?.value ?? fallback
-        let zoom = zoomScale.isFinite ? min(1, max(0, zoomScale - 1)) : 0
-        let side = min(layoutArea.width, layoutArea.height) * options.sizeRatio * (1 + (options.zoomedScale - 1) * zoom)
+        let isZoomed = zoomScale.isFinite && zoomScale > 1
+        let side = min(layoutArea.width, layoutArea.height) * options.sizeRatio * (isZoomed ? options.zoomedScale : 1)
         let width = aspect >= 1 ? side : side * aspect, height = aspect >= 1 ? side / aspect : side
         let w = min(layoutArea.width, max(2, (width / 2).rounded(.down) * 2))
         let h = min(layoutArea.height, max(2, (height / 2).rounded(.down) * 2))
@@ -542,12 +545,23 @@ struct WebcamOverlay: Sendable {
     /// The split-screen frame: `background`, the screen (already placed at `layout.screen`, source pixels fitted
     /// there) and the aspect-filled camera in its pane, both with rounded corners. `camera` nil leaves the pane empty.
     func splitFrame(_ layout: ResolvedLayout, screen: CIImage, camera: CIImage?, background: CIImage) -> CIImage {
-        var result = Self.rounded(screen.cropped(to: layout.screen), rect: layout.screen, radius: layout.paneRadius)
+        let content = splitContent(layout, screen: screen, camera: camera)
+        var result = Self.rounded(content.screen, rect: layout.screen, radius: layout.paneRadius)
             .composited(over: background)
-        if let camera, let rect = layout.camera, !camera.extent.isInfinite, !camera.extent.isEmpty {
-            result = Self.rounded(fill(camera, into: rect), rect: rect, radius: layout.paneRadius).composited(over: result)
+        if let image = content.camera, let rect = layout.camera {
+            result = Self.rounded(image, rect: rect, radius: layout.paneRadius).composited(over: result)
         }
         return result.cropped(to: bounds)
+    }
+
+    /// The un-rounded pane contents: the screen (already placed at `layout.screen`) cropped to its rect and the camera aspect-filled into its pane
+    /// (nil without a usable camera). A stage decorates these itself (`StageRenderer.compose(panes:)`).
+    func splitContent(_ layout: ResolvedLayout, screen: CIImage, camera: CIImage?) -> (screen: CIImage, camera: CIImage?) {
+        var filled: CIImage?
+        if let camera, let rect = layout.camera, !camera.extent.isInfinite, !camera.extent.isEmpty {
+            filled = fill(camera, into: rect)
+        }
+        return (screen.cropped(to: layout.screen), filled)
     }
 
     /// The camera in `rect` keyed by `mask` (white = person, any size; scaled to the camera frame): a canvas-size

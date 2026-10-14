@@ -209,7 +209,7 @@ final class OfflineExporter {
         try zoomConfiguration.validate()
         let clickTimeline = showsClickEffects
             ? ClickEffectTimeline(events: session.events, duration: session.duration,
-                                  configuration: try ClickEffectConfiguration.load(in: directory)) : nil
+                                  configuration: try edit?.clickEffect ?? ClickEffectConfiguration.load(in: directory)) : nil
         var size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
         if let previewWidth, previewWidth > 0, previewWidth < size.width {
             // Reduced-size preview: same aspect ratio (up to even rounding), same renderer.
@@ -241,7 +241,8 @@ final class OfflineExporter {
             sourceDuration: actualDuration,
             cursorTimeline: cursorConfiguration.map {
                 CursorTimeline(events: session.events, keystrokes: session.keystrokes ?? [], duration: session.duration,
-                               configuration: $0, sourceWidth: Double(session.width), sourceHeight: Double(session.height))
+                               configuration: $0, sourceWidth: Double(session.width), sourceHeight: Double(session.height),
+                               cursorTypes: session.cursorTypes ?? [])
             },
             cursorRenderer: cursorConfiguration.map {
                 CursorRenderer(configuration: $0, outputSize: CGSize(width: session.width, height: session.height))
@@ -592,7 +593,13 @@ struct ExportFrameRenderer: Sendable {
             image = cursor.composited(over: image)
         }
         let crop = frame.cropRect(width: width, height: height)
-        let split = splitScreenLayout(at: time, camera: camera, zoomScale: frame.scale)
+        var split = splitScreenLayout(at: time, camera: camera, zoomScale: frame.scale)
+        // With a stage device frame the screen pane holds the whole device and the screen is its aperture.
+        var screenDeviceArea: CGRect?
+        if let stage, let pane = split?.screenPane, let aperture = stage.deviceScreenRect(in: pane) {
+            split?.screen = aperture
+            screenDeviceArea = pane
+        }
         // Screen motion blur: crops interpolated from the zoom one frame earlier to now, one resample
         // each, averaged with equal weights. `beforeTime` is nil across a cut (and at the start).
         let beforeCrop = beforeTime.map { timeline.frame(at: $0).cropRect(width: width, height: height) } ?? crop
@@ -614,7 +621,7 @@ struct ExportFrameRenderer: Sendable {
                     : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
                 return resized.cropped(to: target)
             })
-            let staged = split.flatMap { splitFrame($0, screen: resized, camera: camera, background: stage.background) }
+            let staged = split.flatMap { splitStage($0, stage: stage, deviceArea: screenDeviceArea, screen: resized, camera: camera) }
                 ?? stage.compose(resized)
             return withCaptions(withShortcuts(withWebcam(staged, camera: camera, at: time, zoomScale: frame.scale), at: time), at: time).cropped(to: outputRect)
         }
@@ -705,6 +712,22 @@ struct ExportFrameRenderer: Sendable {
         let moved = screen.transformed(by: CGAffineTransform(translationX: layout.screen.minX - screen.extent.minX,
                                                              y: layout.screen.minY - screen.extent.minY))
         return webcam.overlay.splitFrame(layout, screen: moved, camera: camera, background: background)
+    }
+
+    /// A split-screen frame on a stage: each pane gets the stage treatment (rounded mask, shadow, inset border), and the
+    /// screen pane sits inside the device frame instead when the stage has one (`deviceArea` is its pane). The camera
+    /// pane never gets a device frame.
+    private func splitStage(_ layout: WebcamOverlay.ResolvedLayout, stage: StageRenderer, deviceArea: CGRect?,
+                            screen: CIImage, camera: CIImage?) -> CIImage? {
+        guard let webcam else { return nil }
+        let moved = screen.transformed(by: CGAffineTransform(translationX: layout.screen.minX - screen.extent.minX,
+                                                             y: layout.screen.minY - screen.extent.minY))
+        let content = webcam.overlay.splitContent(layout, screen: moved, camera: camera)
+        var panes = [StageRenderer.Pane(rect: layout.screen, content: content.screen, deviceArea: deviceArea)]
+        if let image = content.camera, let rect = layout.camera {
+            panes.append(StageRenderer.Pane(rect: rect, content: image))
+        }
+        return stage.compose(panes: panes).cropped(to: webcam.overlay.bounds)
     }
 
     /// Shortcut presses are source-time like caption cues; drawn in output space, so zoom never moves them.

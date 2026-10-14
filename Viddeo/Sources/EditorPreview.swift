@@ -220,13 +220,15 @@ struct EditorPreview: View {
         var motionBlurAmount: Double
         var settings: ExportSettings
         var showsClickEffects: Bool
+        var clickEffect: ClickEffectConfiguration
     }
 
     private var key: Key {
         Key(timeline: editor.state.timeline, stage: editor.state.stage, stageEnabled: editor.state.stageEnabled,
             captions: editor.state.captions, captionConfiguration: editor.state.captionConfiguration,
             webcam: editor.state.webcam, shortcuts: editor.state.shortcuts,
-            motionBlurAmount: editor.state.motionBlurAmount, settings: settings, showsClickEffects: showsClickEffects)
+            motionBlurAmount: editor.state.motionBlurAmount, settings: settings, showsClickEffects: showsClickEffects,
+            clickEffect: editor.state.clickEffect)
     }
 
     var body: some View {

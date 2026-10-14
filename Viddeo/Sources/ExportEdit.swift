@@ -26,12 +26,15 @@ struct ExportEdit: Sendable {
     /// Motion blur 0...1 for the cursor and the screen zoom (one shared setting). Nil uses the
     /// session's `cursor-config.json`, or the default 1 when absent.
     var motionBlurAmount: Double?
+    /// Click effect settings from the editor. Nil uses the session's `click-config.json`. The
+    /// "show click effects" export toggle still turns every effect off.
+    var clickEffect: ClickEffectConfiguration?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
          audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil,
          shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil,
-         motionBlurAmount: Double? = nil) {
+         motionBlurAmount: Double? = nil, clickEffect: ClickEffectConfiguration? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
@@ -39,9 +42,10 @@ struct ExportEdit: Sendable {
         self.webcam = webcam
         self.shortcuts = shortcuts.flatMap { $0.configuration.enabled && !$0.events.isEmpty ? $0 : nil }
         self.motionBlurAmount = motionBlurAmount
+        self.clickEffect = clickEffect
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil && clickEffect == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions

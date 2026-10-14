@@ -1376,6 +1376,50 @@ struct VerifyExport {
             (4.0, 640, 360, orange), (4.0, 36, 360, orange), (4.0, 1000, 360, cyan), (4.0, 300, 330, blue)
         ])
 
+        // The stage treatment applies per pane: shadow just outside each pane, the inset border inside each, and the
+        // device frame around the screen pane only. Panes: screen x 72..640 / y 200..520, camera x 640..1208 / y 72..648.
+        var decorated = stage
+        decorated.shadow = StageStyle.Shadow(intensity: 1, distance: 0, angle: 45, blur: 2, isDirectional: false)
+        decorated.inset = StageStyle.Inset(size: 12, alpha: 1, color: "#ff00ff")
+        let decoratedAsset = try await export("webcam-split-stage-decorated.mp4", split, stage: decorated)
+        let control = try await sampleColor(asset: decoratedAsset, time: 4.0, x: 20.0 / 1280, y: 20.0 / 720)
+        guard control.matches(orange, tolerance: 40) else {
+            throw VerificationError.failed("split stage background far from the panes is \(control), expected orange")
+        }
+        for (label, x, y) in [("left of the screen pane", 69.0, 360.0), ("above the screen pane", 300.0, 197.0),
+                              ("right of the camera pane", 1211.0, 360.0), ("above the camera pane", 900.0, 69.0)] {
+            let shadowed = try await sampleColor(asset: decoratedAsset, time: 4.0, x: x / 1280, y: y / 720)
+            guard Int(shadowed.red) < Int(control.red) - 25, Int(shadowed.green) < Int(control.green) - 12 else {
+                throw VerificationError.failed("no pane shadow \(label): \(shadowed) is not darker than the background \(control)")
+            }
+        }
+        try await expect(decoratedAsset, "pane inset borders", [
+            (4.0, 77, 360, magenta), (4.0, 1203, 360, magenta), (4.0, 300, 205, magenta),
+            (4.0, 300, 300, blue), (4.0, 900, 360, cyan)
+        ])
+
+        var device = stage
+        device.deviceMockup = DeviceMockupConfiguration(enabled: true, deviceID: "laptop", finish: "dark")
+        let deviceAsset = try await export("webcam-split-stage-device.mp4", split, stage: device)
+        // Laptop fitted into the screen pane: x 72..640, y 180..540; its aperture starts at (99.5, 196).
+        let bezel = try await sampleColor(asset: deviceAsset, time: 4.0, x: 86.0 / 1280, y: 360.0 / 720)
+        guard bezel.matches(RGB(red: 37, green: 41, blue: 50), tolerance: 35) else {
+            throw VerificationError.failed("split device bezel pixel is \(bezel), expected the dark bezel")
+        }
+        try await expect(deviceAsset, "split screen in a device frame", [
+            (4.0, 300, 273, blue), (4.0, 480, 273, green), (4.0, 300, 430, red),
+            (4.0, 900, 360, cyan), (4.0, 20, 20, orange), (4.0, 900, 90, cyan)
+        ])
+        // The camera pane is a rounded rectangle, not a device: no bezel at its left edge, its corner is cut.
+        let cameraEdge = try await sampleColor(asset: deviceAsset, time: 4.0, x: 650.0 / 1280, y: 360.0 / 720)
+        guard cameraEdge.matches(cyan) else {
+            throw VerificationError.failed("the camera pane at its edge is \(cameraEdge), expected plain camera pixels")
+        }
+        let cameraCorner = try await sampleColor(asset: deviceAsset, time: 4.0, x: 641.0 / 1280, y: 73.0 / 720)
+        guard !cameraCorner.matches(cyan, tolerance: 60) else {
+            throw VerificationError.failed("the camera pane corner is not rounded: \(cameraCorner)")
+        }
+
         // A layout item switches the overlay to split screen and back (source time).
         var timed = WebcamConfiguration()
         timed.layoutItems = [CameraLayoutItem(startMs: 3000, endMs: 6000, layout: .splitScreen)]

@@ -54,6 +54,8 @@ struct CursorConfiguration: Codable, Sendable, Equatable {
     var stopMovementInLastPartMs = 0.0
     /// Motion blur 0...1: strength = amount x fps/60, so the shutter is amount/60 s at any fps.
     var motionBlurAmount = 1.0
+    /// Draw the arrow at every moment, ignoring recorded cursor types (the reference's `alwaysUseDefault`).
+    var alwaysUseDefault = false
 
     /// Values of 12 or less are icon multipliers in the reference format (×16).
     var effectiveSize: Double { size <= 12 ? size * 16 : size }
@@ -154,6 +156,7 @@ extension CursorConfiguration {
         try read(.loopPositionBeforeEndMs, \.loopPositionBeforeEndMs)
         try read(.stopMovementInLastPartMs, \.stopMovementInLastPartMs)
         try read(.motionBlurAmount, \.motionBlurAmount)
+        try read(.alwaysUseDefault, \.alwaysUseDefault)
         if let value = try c.decodeIfPresent(Double.self, forKey: .removeShakeThresholdPx) {
             removeShakeThresholdPx = value
         } else if let value = try decoder.container(keyedBy: LegacyKeys.self)
@@ -177,6 +180,7 @@ struct CursorState: Sendable, Equatable {
     var rotationRadians: Double
     var opacity: Double
     var blurRadius: Double
+    var kind: CursorKind = .arrow
 }
 
 /// Cursor state now and one frame earlier, blended by the blur strength: the trail runs from
@@ -244,6 +248,7 @@ struct CursorTimeline: Sendable {
     private static let snapWindow = 0.175
 
     private let motionBlurAmount: Double
+    private let typeEvents: [CursorTypeEvent]
 
     private let samples: [CursorState]
     private let firstEventTime: Double?
@@ -251,7 +256,7 @@ struct CursorTimeline: Sendable {
 
     init(events: [CursorEvent], keystrokes: [KeystrokeEvent], duration: Double,
          configuration: CursorConfiguration = .init(),
-         sourceWidth: Double = 1920, sourceHeight: Double = 1080) {
+         sourceWidth: Double = 1920, sourceHeight: Double = 1080, cursorTypes: [CursorTypeEvent] = []) {
         // Export validates user configuration; pure callers get safe defaults.
         let config = (try? configuration.validate()) == nil ? CursorConfiguration() : configuration
         let fps = Self.framesPerSecond
@@ -275,6 +280,10 @@ struct CursorTimeline: Sendable {
         firstEventTime = first?.time
         hiddenBlurRadius = config.hideBlurRadius
         motionBlurAmount = config.motionBlurAmount
+        // Stable by time; same-time changes keep recorded order so the later one wins.
+        typeEvents = config.alwaysUseDefault ? [] : cursorTypes.enumerated().filter { $0.element.time.isFinite }
+            .sorted { $0.element.time < $1.element.time || ($0.element.time == $1.element.time && $0.offset < $1.offset) }
+            .map(\.element)
 
         let directional = config.rotationMode == .directional
         let rotationSpring = directional
@@ -421,11 +430,24 @@ struct CursorTimeline: Sendable {
         var state = CursorState(x: mix(a.x, b.x), y: mix(a.y, b.y), scale: mix(a.scale, b.scale),
                                 rotationRadians: mix(a.rotationRadians, b.rotationRadians),
                                 opacity: mix(a.opacity, b.opacity), blurRadius: mix(a.blurRadius, b.blurRadius))
+        state.kind = kind(at: time)
         if firstEventTime.map({ time < $0 }) ?? true {
             state.opacity = 0
             state.blurRadius = hiddenBlurRadius
         }
         return state
+    }
+
+    /// Step function: the kind of the last change at or before `time`; `.arrow` before the first one,
+    /// without recorded types, and always when `alwaysUseDefault` is set.
+    func kind(at time: Double) -> CursorKind {
+        guard time.isFinite, !typeEvents.isEmpty else { return .arrow }
+        var low = 0, high = typeEvents.count
+        while low < high {
+            let mid = (low + high) / 2
+            if typeEvents[mid].time <= time { low = mid + 1 } else { high = mid }
+        }
+        return low == 0 ? .arrow : typeEvents[low - 1].kind
     }
 
     /// Shutter trail at `time`: `before` is the state one frame earlier and the trail starts at

@@ -161,6 +161,27 @@ struct EditorView: View {
             }
             Text("Motion blur smears the cursor and zoom camera moves; the camera overlay is not blurred.")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Click effect")
+                Picker("Click effect", selection: Binding(get: { editor.state.clickEffect.effect }, set: { value in
+                    editor.edit { $0.clickEffect.effect = value }
+                })) {
+                    Text("None").tag(ClickEffectType.none)
+                    Text("Circle").tag(ClickEffectType.circle)
+                    Text("Ripple").tag(ClickEffectType.ripple)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            HStack {
+                Text("Ripple pull size")
+                Slider(value: Binding(get: { editor.state.clickEffect.pullSize01 }, set: { value in
+                    editor.edit({ $0.clickEffect.pullSize01 = value }, key: "ripplePull")
+                }), in: 0...0.1)
+                Text(editor.state.clickEffect.pullSize01.formatted(.percent.precision(.fractionLength(1)))).frame(width: 50)
+            }
+            .disabled(editor.state.clickEffect.effect != .ripple)
+            Text("Click effects are drawn on the recording before zoom. \"Show click effects in export\" on the record screen turns them all off.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Backgrounds, captions and edits appear in exported MP4 and GIF files.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()

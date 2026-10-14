@@ -13,6 +13,8 @@ struct EditorState: Sendable, Equatable {
     var shortcuts: ShortcutOverlayConfiguration
     /// Shared cursor and screen-zoom motion blur, 0...1 (`cursor-config.json`).
     var motionBlurAmount: Double
+    /// Click effect type, ripple pull size and tuning (`click-config.json`).
+    var clickEffect: ClickEffectConfiguration
 }
 
 @MainActor
@@ -46,7 +48,8 @@ final class EditorModel {
                 ? try AudioMixConfiguration.load(in: directory) : .editorDefault,
             webcam: try WebcamConfiguration.load(in: directory),
             shortcuts: try ShortcutOverlayConfiguration.load(in: directory),
-            motionBlurAmount: try CursorConfiguration.load(in: directory).motionBlurAmount)
+            motionBlurAmount: try CursorConfiguration.load(in: directory).motionBlurAmount,
+            clickEffect: try ClickEffectConfiguration.load(in: directory))
         self.session = session
         self.directory = directory
         self.project = project
@@ -69,7 +72,7 @@ final class EditorModel {
                     ? (state.captions, state.captionConfiguration) : nil,
                    audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam,
                    shortcuts: session.shortcuts.map { ($0, state.shortcuts) },
-                   motionBlurAmount: state.motionBlurAmount)
+                   motionBlurAmount: state.motionBlurAmount, clickEffect: state.clickEffect)
     }
 
     /// Failed edits leave both state and history intact.
@@ -85,6 +88,7 @@ final class EditorModel {
             try candidate.audio.validate()
             try candidate.webcam.validate()
             try candidate.shortcuts.validate()
+            try candidate.clickEffect.validate()
             guard (0...1).contains(candidate.motionBlurAmount) else { throw CursorError.invalidConfiguration }
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
@@ -127,6 +131,10 @@ final class EditorModel {
             if cursor.motionBlurAmount != state.motionBlurAmount {
                 cursor.motionBlurAmount = state.motionBlurAmount
                 try cursor.save(in: directory)
+            }
+            // Like the cursor sidecar, click-config.json is only created for non-default settings.
+            if try state.clickEffect != ClickEffectConfiguration.load(in: directory) {
+                try state.clickEffect.save(in: directory)
             }
             try updated.save(to: directory)
             project = updated

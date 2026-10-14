@@ -542,7 +542,7 @@ struct VerifyWebcam {
         try expect(overlay { $0.cutout.positionX = 0.5 }.cutoutRect(cameraAspect: 1).midX == 640, "position 0.5 centers")
         try expect(overlay { $0.cutout.sizeRatio = 0.25 }.cutoutRect(cameraAspect: 1).width == 180, "size ratio scales the short side")
         try expect(c.cutoutRect(cameraAspect: 1, zoomScale: 2).width == 288, "zoomed scale 0.8 at 2x zoom: 360 × 0.8")
-        try expect(c.cutoutRect(cameraAspect: 1, zoomScale: 1.5).width == 324, "halfway through the zoom blend")
+        try expect(c.cutoutRect(cameraAspect: 1, zoomScale: 1.5).width == 288, "zoomed geometry does not invent a size blend")
         try expect(c.cutoutRect(cameraAspect: 1, zoomScale: 5).width == 288 && c.cutoutRect(cameraAspect: 1, zoomScale: .nan).width == 360,
                    "the blend is clamped; a non-finite zoom is unzoomed")
         let staged = overlay(area: CGRect(x: 72, y: 72, width: 1136, height: 576)).cutoutRect(cameraAspect: 1)
