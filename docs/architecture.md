@@ -61,7 +61,10 @@ Cursor motion: `CursorTimeline` filters its input events (`CursorEventFilter`: M
 optional loop window with a return-to-start event), springs them, and exposes `trail(at:fps:)` (now plus the state one
 output frame earlier, blended by `motionBlurAmount x fps/60`). `CursorRenderer` draws the trail as 16 (export) or 6
 (preview) equal-alpha stamps of one arrow bitmap; `makeRenderer` sets `cursorFPS` and the sample quality on the
-`ExportFrameRenderer`. Screen/zoom motion blur is not implemented. See `research/cursor-motion.md`.
+`ExportFrameRenderer`. Screen/zoom motion blur uses the same `motionBlurAmount` (`cursor-config.json`, `ExportEdit.motionBlurAmount`
+from the editor's Background tab): `ScreenMotionBlur` (in `ZoomTimeline.swift`) interpolates the zoom crop between the previous output
+frame and now, `ExportFrameRenderer` averages one resample per crop (16 export / 6 preview), and `previousSourceTime(forPlaybackTime:)`
+maps the earlier frame through the edit and returns nil across a cut. The camera overlay is not blurred. See `research/cursor-motion.md`.
 
 `OfflineExporter.makeRenderer` builds the `ExportFrameRenderer` (validation, zoom, clicks, cursor, stage,
 captions, camera plan) for both the export and the editor preview. `PreviewFrameRenderer` (an actor in
