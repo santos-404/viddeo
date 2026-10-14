@@ -109,9 +109,9 @@ Test microphone denial and a second capture after granting access.
 The basic timeline editor, on-device caption provider, background renderer,
 speed/silence actions and rendered cursor are implemented. Speech model availability,
 transcription quality and the new capture controls need live acceptance.
-Webcam capture/overlay and voice-cleanup/mixing/click-sound modules have standalone
-verifiers but are not yet wired into the app/export path. Device mockups, shortcut
-overlays, continuous speed ramps, processed preview and ripple distortion remain
+The camera overlay (Camera overlay toggle before recording, Camera tab in the editor) and audio
+mix are wired into recording and MP4/GIF export; camera permission, device behavior and sync are
+live-only checks. Device mockups, shortcut overlays, continuous speed ramps, processed preview and ripple distortion remain
 follow-ups. All of these areas remain in scope.
 
 M4 (export presets, GIF, side-by-side comparison tool) is implemented and verified

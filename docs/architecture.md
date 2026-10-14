@@ -71,7 +71,9 @@ math and media independently of screen permissions.
 
 The basic editor and source/playback mapping now work. `AppleSpeechCaptionProvider`
 uses SpeechAnalyzer/SpeechTranscriber; caption audio extraction preserves the movie's
-epoch. Microphone cleanup, master volume/mutes and click sounds are in the export. The
-webcam recorder/overlay is implemented and tested independently but still needs app/export
-integration. Processed playback preview, camera lifecycle integration, background music and one
-mixed (limited, loudness-normalized) audio export track remain follow-ups.
+epoch. Microphone cleanup, master volume/mutes, click sounds and the camera overlay are in the export.
+The camera is recorded by `WebcamRecorder` as a separate `camera.mov`, started after the screen stream
+and aligned afterwards through host-clock first-frame times; `WebcamExportPlan`/`WebcamFrameSource`
+decode and place it per output frame (seek-capable for edited timelines), so recording never depends on
+the camera. Processed playback preview, background music, one mixed (limited, loudness-normalized) audio
+export track, split-screen/cutout layouts and face tracking remain follow-ups.

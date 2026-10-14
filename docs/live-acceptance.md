@@ -60,5 +60,17 @@ Things only a person with the real hardware/permissions can verify. Synthetic ve
   visible click; the click track must be a separate third track in QuickTime/ffprobe.
 - [ ] Mute system/microphone and change master volume; confirm exported tracks follow.
 
-Camera integration remains pending; the existing camera/audio checklist
-above is for their standalone modules and subsequent live integration acceptance.
+## Camera overlay — 2026-10-14
+
+- [ ] Enable Camera overlay, record ~10 s with a visible gesture at the start; macOS prompts for camera
+  access once (Info.plist has the usage string; no entitlement is needed for this unsandboxed build).
+- [ ] Export: camera appears at the chosen anchor; its motion lines up with the screen action (the
+  alignment is the difference of host-clock first-frame times; check start and end of a clap).
+- [ ] Deny camera access, or have no camera: the screen recording still starts, a warning names the reason,
+  and the editor has no Camera tab.
+- [ ] Unplug the camera mid-recording: recording stops cleanly, the camera track ends early with a warning.
+- [ ] Camera tab: mirror, circle shape, anchors, size, full-screen camera, screen only; Hide while silent
+  needs microphone audio (camera hides ≥ 500 ms into a ≥ 2 s pause, comes back 500 ms before speech).
+- [ ] Camera + stage + captions + trim/reorder together in one export, MP4 and GIF.
+
+Hide-while-silent is the one camera path without a synthetic end-to-end pixel check.
