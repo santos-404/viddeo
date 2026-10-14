@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "eeeeeeee-2222-4aaa-8bbb-000000000001",
+  "name": "Viddeo Editor Demo",
+  "createdAt": "2026-10-14T21:40:00Z",
+  "updatedAt": "2026-10-14T21:40:00Z",
+  "lastSavedAt": null,
+  "sessionID": "d0d0d0d0-1111-4aaa-8bbb-000000000001",
+  "timeline": {
+    "sourceDuration": 8.0,
+    "segments": [
+      {
+        "id": "11111111-3333-4aaa-8bbb-000000000001",
+        "sourceStart": 0.0,
+        "sourceEnd": 2.5,
+        "timeScale": 1.0,
+        "volume": 1.0,
+        "systemVolume": 1.0,
+        "hideCursor": false
+      },
+      {
+        "id": "22222222-3333-4aaa-8bbb-000000000002",
+        "sourceStart": 2.75,
+        "sourceEnd": 5.25,
+        "timeScale": 0.5,
+        "volume": 1.0,
+        "systemVolume": 1.0,
+        "hideCursor": false
+      },
+      {
+        "id": "33333333-3333-4aaa-8bbb-000000000003",
+        "sourceStart": 5.25,
+        "sourceEnd": 8.0,
+        "timeScale": 1.25,
+        "volume": 1.0,
+        "systemVolume": 1.0,
+        "hideCursor": false
+      }
+    ]
+  },
+  "exportPresetID": null,
+  "stageEnabled": false
+}

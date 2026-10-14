@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "id": "d0d0d0d0-1111-4aaa-8bbb-000000000001",
+  "createdAt": 813706800.0,
+  "displayID": 1,
+  "width": 1280,
+  "height": 720,
+  "duration": 8.0,
+  "videoFilename": "raw.mp4",
+  "events": [
+    {
+      "time": 0.3,
+      "x": 0.14,
+      "y": 0.22,
+      "kind": "move"
+    },
+    {
+      "time": 0.9,
+      "x": 0.32,
+      "y": 0.42,
+      "kind": "down"
+    },
+    {
+      "time": 1.02,
+      "x": 0.32,
+      "y": 0.42,
+      "kind": "up"
+    },
+    {
+      "time": 3.2,
+      "x": 0.68,
+      "y": 0.35,
+      "kind": "move"
+    },
+    {
+      "time": 4.0,
+      "x": 0.78,
+      "y": 0.64,
+      "kind": "down"
+    },
+    {
+      "time": 4.12,
+      "x": 0.78,
+      "y": 0.64,
+      "kind": "up"
+    },
+    {
+      "time": 6.7,
+      "x": 0.52,
+      "y": 0.78,
+      "kind": "move"
+    }
+  ],
+  "droppedFrames": 0,
+  "eventCaptureAvailable": true,
+  "cursorEmbedded": false
+}
