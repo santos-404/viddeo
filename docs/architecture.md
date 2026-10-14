@@ -89,6 +89,11 @@ composites it after the camera and before captions, in output space, so zoom nev
 GIF and the editor preview share that path. The settings are part of `EditorState` and persist as
 `shortcuts-config.json`; `ExportEdit.load` reads it.
 
+Device mockups are an opt-in part of `StageStyle`. `DeviceFrameRenderer` uses viddeo-authored geometry
+and procedural Core Image shapes; the stage fits the whole device while the exporter resamples the
+zoomed screen directly to its aperture. The device owns screen rounding, while stage background,
+padding and shadow remain outer layers.
+
 `ClickEffectTimeline` filters and sorts pointer-down events, bounds active events
 by binary search, and supplies deterministic source-space rings during export.
 It does not depend on recording state; overlays follow the same crop as raw video.
@@ -118,4 +123,15 @@ epoch. Microphone cleanup, master volume/mutes, click sounds and the camera over
 The camera is recorded by `WebcamRecorder` as a separate `camera.mov`, started after the screen stream
 and aligned afterwards through host-clock first-frame times; `WebcamExportPlan`/`WebcamFrameSource`
 decode and place it per output frame (seek-capable for edited timelines), so recording never depends on
-the camera. Processed playback preview, split-screen/cutout layouts and face tracking remain follow-ups.
+the camera. Face tracking remains a follow-up.
+
+Camera layouts live in `WebcamConfiguration` (`layout` is the default; `layoutItems` are source-time
+`CameraLayoutItem`s that override it, at least 500 ms, non-overlapping; `split` and `cutout` hold the per-layout
+options; old `webcam-config.json` files decode unchanged). `WebcamOverlay.resolve` turns a layout into a screen
+rect and a camera rect from the canvas, or from the stage's padded area. For `splitScreen` the renderer fits the
+zoomed, motion-blurred screen into the screen pane (`ExportFrameRenderer.splitScreenLayout`/`splitFrame`; the stage
+background shows around and between the panes) and aspect-fills the camera into its pane; the stage's shadow, border
+and device frame are not drawn around split panes. `cutoutCamera` runs `PersonSegmenter` (Vision
+`VNGeneratePersonSegmentationRequest`, `.balanced` for export, `.fast` for the preview) through `CutoutMaskCache`,
+which caches one mask per decoded camera frame and records every frame that fell back to the rounded overlay.
+Layouts switch immediately at item boundaries.

@@ -75,6 +75,20 @@ Things only a person with the real hardware/permissions can verify. Synthetic ve
 
 Hide-while-silent is the one camera path without a synthetic end-to-end pixel check.
 
+## Camera layouts — 2026-10-14
+
+- [ ] Camera tab: Split screen (side by side on a landscape export, stacked on a portrait one), Flip, screen share
+  slider and Gap between panes; with a stage on, the stage background shows around the panes and in the gap.
+- [ ] Layout changes: at a playhead position press Add at playhead, set the layout, scrub across the boundaries
+  (the layout switches immediately, no transition), delete; undo/redo and Save Project keep them; export
+  matches the preview.
+- [ ] Cutout camera with a real person on camera: the person (no background) sits over the screen at the bottom
+  right; judge mask edges, flicker, hair and hands near the frame edge, and `.fast` (preview) against `.balanced`
+  (export) quality. Cutout quality is live-only: the synthetic verifier injects the mask and cannot judge Vision.
+- [ ] Cutout with nobody in view or the camera covered: the rounded camera overlay is drawn on those frames and
+  the export still completes.
+- [ ] Zoomed screen with Cutout: the cutout shrinks toward the Zoomed scale as the zoom goes from 1x to 2x.
+
 ## Shortcuts, cursor motion, colour — 2026-10-14
 
 - [ ] Enable Record keyboard shortcuts, press ⌘C, ⌘⇧4, Esc, arrows and type a sentence; export with Show
