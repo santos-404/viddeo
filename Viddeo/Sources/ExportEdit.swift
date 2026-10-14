@@ -21,18 +21,22 @@ struct ExportEdit: Sendable {
     /// Overlay settings for a recorded camera; ignored for sessions without one. Nil uses the
     /// session's `webcam-config.json`, or the observed defaults when the file is absent.
     var webcam: WebcamConfiguration?
+    /// Captured shortcut presses (source time) and the overlay settings; nil unless the overlay is enabled.
+    var shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
-         audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil) {
+         audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil,
+         shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
         self.audio = audio.flatMap { $0.isExportNeutral ? nil : $0 }
         self.webcam = webcam
+        self.shortcuts = shortcuts.flatMap { $0.configuration.enabled && !$0.events.isEmpty ? $0 : nil }
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
@@ -57,6 +61,10 @@ struct ExportEdit: Sendable {
         }
         if session.webcam != nil, manager.fileExists(atPath: directory.appendingPathComponent("webcam-config.json").path) {
             edit.webcam = try WebcamConfiguration.load(in: directory)
+        }
+        if let events = session.shortcuts, !events.isEmpty {
+            let configuration = try ShortcutOverlayConfiguration.load(in: directory)
+            if configuration.enabled { edit.shortcuts = (events, configuration) }
         }
         if manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path) {
             let audio = try AudioMixConfiguration.load(in: directory)

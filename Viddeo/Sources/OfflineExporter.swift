@@ -242,6 +242,14 @@ final class OfflineExporter {
                 CursorRenderer(configuration: $0, outputSize: CGSize(width: session.width, height: session.height))
             }
         )
+        renderer.cursorFPS = Double(settings.fps)
+        if let previewWidth, previewWidth > 0 { renderer.cursorBlurQuality = .preview }
+        if let shortcuts = edit?.shortcuts {
+            let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
+                ?? renderer.contentRect
+            renderer.shortcuts = ShortcutOverlayRenderer(events: shortcuts.events, configuration: shortcuts.configuration,
+                                                         outputSize: outputSize, contentRect: contentRect)
+        }
         if session.webcam != nil {
             let configuration = try edit?.webcam ?? WebcamConfiguration.load(in: directory)
             let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
@@ -262,6 +270,19 @@ final class OfflineExporter {
     /// `mix` adds microphone cleanup, master volume/mutes, a click-sound track (from `events`) and
     /// background music (from `sessionDirectory`); with `mix.mixdownSingleTrack` all of them are summed
     /// into one limited stereo AAC track instead of separate tracks.
+    /// The colour space of every exported pixel: renderers author sRGB values (stage colours, cursor,
+    /// captions, ScreenCaptureKit content), so they are written as sRGB and tagged BT.709 primaries and
+    /// matrix with the sRGB transfer function (never `itur_709`, whose OETF re-encodes the values).
+    nonisolated static var exportColorSpace: CGColorSpace {
+        CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    }
+
+    nonisolated static func tagAsSRGB(_ buffer: CVPixelBuffer) {
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+    }
+
     private nonisolated static func writeMovie(
         source: URL, destination: URL, codec: ExportCodec, renderer: ExportFrameRenderer,
         duration: CMTime, sourceDuration: CMTime, audioRoles: [ExportAudioTrack.Role]?,
@@ -290,7 +311,9 @@ final class OfflineExporter {
             AVVideoHeightKey: height,
             AVVideoColorPropertiesKey: [
                 AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                // The pixels are sRGB-encoded (see `exportColorSpace`), so the stream says so: players
+                // decode BT.709 transfer as a gamma ~1.96 curve, which lifts every tone by 10-20/255.
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_IEC_sRGB,
                 AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
             ],
             AVVideoCompressionPropertiesKey: compression
@@ -408,7 +431,7 @@ final class OfflineExporter {
             writer.startSession(atSourceTime: .zero)
 
             let context = CIContext()
-            let colorSpace = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
+            let colorSpace = Self.exportColorSpace
             let frameCount = ExportFrameRenderer.frameCount(duration: duration.seconds, fps: settings.fps)
             var frameIndex = 0
             var audioFinished = Array(repeating: false, count: audio.count)
@@ -434,6 +457,7 @@ final class OfflineExporter {
                         throw ExportError.encodingFailed("could not allocate an output frame")
                     }
                     let camera = try cameraFrames?.image(atSource: sourceTime)
+                    Self.tagAsSRGB(buffer)
                     context.render(renderer.image(source: sourceImage, at: sourceTime, camera: camera), to: buffer,
                                    bounds: renderer.outputRect, colorSpace: colorSpace)
                     guard adaptor.append(buffer, withPresentationTime: time) else {
@@ -497,10 +521,15 @@ struct ExportFrameRenderer: Sendable {
     var edit: TimelineModel? = nil
     var stage: StageRenderer? = nil
     var captions: CaptionRenderer? = nil
+    var shortcuts: ShortcutOverlayRenderer? = nil
     /// Mapped source times are clamped below this (the decodable media's end).
     var sourceDuration: Double = .infinity
     var cursorTimeline: CursorTimeline? = nil
     var cursorRenderer: CursorRenderer? = nil
+    /// Output frame rate and sample caps for the cursor motion-blur trail (export defaults; the
+    /// editor preview gets the cheaper preview quality in `makeRenderer`).
+    var cursorFPS = 60.0
+    var cursorBlurQuality = CursorBlurQuality.export
     var webcam: WebcamExportPlan? = nil
 
     /// Identity without a timeline, so the unedited export samples exactly as before.
@@ -543,7 +572,8 @@ struct ExportFrameRenderer: Sendable {
         var image = clickTimeline?.image(over: normalizedSource, at: time) ?? normalizedSource
         let hideCursor = edit?.segments.first { $0.sourceStart <= time && time < $0.sourceEnd }?.hideCursor ?? false
         if !hideCursor, let cursorTimeline, let cursorRenderer,
-           let cursor = cursorRenderer.image(for: cursorTimeline.state(at: time)) {
+           let cursor = cursorRenderer.image(for: cursorTimeline.trail(at: time, fps: cursorFPS),
+                                             quality: cursorBlurQuality) {
             image = cursor.composited(over: image)
         }
         let scale = frame.scale.isFinite ? max(1, frame.scale) : 1
@@ -574,7 +604,7 @@ struct ExportFrameRenderer: Sendable {
                 ])
                 : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
             let staged = stage.compose(resized.cropped(to: CGRect(origin: .zero, size: size)))
-            return withCaptions(withWebcam(staged, camera: camera, at: time), at: time).cropped(to: outputRect)
+            return withCaptions(withShortcuts(withWebcam(staged, camera: camera, at: time), at: time), at: time).cropped(to: outputRect)
         }
 
         // One resample maps the crop straight into the fitted content rectangle.
@@ -591,7 +621,7 @@ struct ExportFrameRenderer: Sendable {
             .transformed(by: CGAffineTransform(translationX: content.minX, y: content.minY))
             .cropped(to: content)
         let background = CIImage(color: .black).cropped(to: outputRect)
-        return withCaptions(withWebcam(placed.composited(over: background), camera: camera, at: time), at: time)
+        return withCaptions(withShortcuts(withWebcam(placed.composited(over: background), camera: camera, at: time), at: time), at: time)
             .cropped(to: outputRect)
     }
 
@@ -603,6 +633,12 @@ struct ExportFrameRenderer: Sendable {
         guard let overlay = webcam.overlay.image(camera: camera, atMs: sourceTime * 1000, chunks: webcam.chunks) else {
             return frame
         }
+        return overlay.composited(over: frame)
+    }
+
+    /// Shortcut presses are source-time like caption cues; drawn in output space, so zoom never moves them.
+    private func withShortcuts(_ frame: CIImage, at sourceTime: Double) -> CIImage {
+        guard let overlay = shortcuts?.image(atMs: sourceTime * 1000) else { return frame }
         return overlay.composited(over: frame)
     }
 
@@ -678,7 +714,9 @@ final class SourceFrameReader {
             guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
             let time = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             guard time.isFinite else { continue }
-            return (time, CIImage(cvPixelBuffer: buffer))
+            // The raw recording's pixels are sRGB whatever its tag says (ScreenCaptureKit output is
+            // written with a BT.709 transfer tag), so decode them as sRGB, not by the stream's tags.
+            return (time, CIImage(cvPixelBuffer: buffer, options: [.colorSpace: OfflineExporter.exportColorSpace]))
         }
         return nil
     }

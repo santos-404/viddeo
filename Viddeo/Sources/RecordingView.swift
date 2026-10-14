@@ -52,6 +52,13 @@ struct RecordingView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Toggle("Record keyboard shortcuts", isOn: $viewModel.capturesShortcuts)
+                .disabled(viewModel.isBusy)
+            if viewModel.capturesShortcuts {
+                Text("Stores only shortcuts (⌘, ⌥ or ⌃ combinations and keys like Esc, Return or arrows) with their times, never typed text.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Toggle("Show click effects in export", isOn: $viewModel.showsClickEffects)
                 .disabled(viewModel.isBusy)
 

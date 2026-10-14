@@ -195,9 +195,10 @@ struct VerifyExport {
         try await verifyEdits(root: directory, width: width, height: height, duration: duration)
         try await verifyAudioMix(root: directory, width: width, height: height, duration: duration)
         try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
+        try await verifyShortcuts(root: directory, width: width, height: height, duration: duration)
 
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding.")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding; keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
     }
 
     @MainActor
@@ -236,6 +237,71 @@ struct VerifyExport {
                 throw VerificationError.failed("rendered cursor at \(time)s has \(white) white pixels; expected visible=\(visible)")
             }
         }
+        try await verifyCursorMotionBlur(session: session, directory: directory)
+    }
+
+    /// A cursor jumping across the frame leaves a trail behind its direction of motion at motion blur
+    /// amount 1 and nothing at amount 0. Frames are compared against an export with the cursor
+    /// hidden, so the fixture background cancels out.
+    private static func verifyCursorMotionBlur(session: RecordingSession, directory: URL) async throws {
+        var session = session
+        session.cursorEmbedded = false
+        session.keystrokes = nil
+        // Step-held jump from x 0.1 to 0.5 at 1 s. At 15 fps the trail strength is 0.25, so the frames
+        // within one frame of the jump carry a trail of a quarter of the jump ending at x 0.5.
+        session.events = [CursorEvent(time: 0, x: 0.1, y: 0.1, kind: .move),
+                          CursorEvent(time: 1, x: 0.5, y: 0.1, kind: .move),
+                          CursorEvent(time: 2, x: 0.5, y: 0.1, kind: .move)]
+        defer { try? FileManager.default.removeItem(at: directory.appendingPathComponent("cursor-config.json")) }
+        func export(amount: Double, hide: Bool) async throws -> AVURLAsset {
+            var config = CursorConfiguration()
+            config.size = 96
+            config.smoothing = false
+            config.removeShakeThresholdPx = 0   // the jump is intentional
+            config.hide = hide
+            config.motionBlurAmount = amount
+            try config.save(in: directory)
+            let destination = directory.appendingPathComponent("blur-\(amount)-\(hide).mp4")
+            try await OfflineExporter().export(session: session, directory: directory, destination: destination,
+                                              showsClickEffects: false, settings: ExportSettings(fps: 15, height: 720))
+            return AVURLAsset(url: destination)
+        }
+        func frame(_ asset: AVURLAsset, _ index: Int) async throws -> NSBitmapImageRep {
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            return NSBitmapImageRep(cgImage: try await generator.image(at: CMTime(value: CMTimeValue(index * 40), timescale: 600)).image)
+        }
+        /// Pixels inside the fractional box that differ from the hidden-cursor frame.
+        func changed(_ rep: NSBitmapImageRep, _ base: NSBitmapImageRep, x: ClosedRange<Double>, y: ClosedRange<Double>) -> Int {
+            var count = 0
+            for py in Int(y.lowerBound * Double(rep.pixelsHigh))..<Int(y.upperBound * Double(rep.pixelsHigh)) {
+                for px in Int(x.lowerBound * Double(rep.pixelsWide))..<Int(x.upperBound * Double(rep.pixelsWide)) {
+                    guard let a = rep.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB),
+                          let b = base.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB) else { continue }
+                    if abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                        + abs(a.blueComponent - b.blueComponent) > 0.3 { count += 1 }
+                }
+            }
+            return count
+        }
+        let hiddenAsset = try await export(amount: 1, hide: true)
+        let blurredAsset = try await export(amount: 1, hide: false)
+        let sharpAsset = try await export(amount: 0, hide: false)
+        var trail = 0, sharp = 0, ahead = 0
+        for index in 14...19 {   // 15 fps frames from 0.93 s to 1.27 s
+            let base = try await frame(hiddenAsset, index)
+            let blurred = try await frame(blurredAsset, index)
+            let still = try await frame(sharpAsset, index)
+            // The arrow body lies right of each stamp's tip, so x 0.41...0.48 is covered by the trail only.
+            trail = max(trail, changed(blurred, base, x: 0.41...0.48, y: 0.1...0.2))
+            sharp = max(sharp, changed(still, base, x: 0.41...0.48, y: 0.1...0.2))
+            ahead = max(ahead, changed(blurred, base, x: 0.56...0.62, y: 0.1...0.2))
+        }
+        guard trail > 150, sharp < 10 else {
+            throw VerificationError.failed("cursor motion blur trail changed \(trail) pixels at amount 1 and \(sharp) at amount 0")
+        }
+        guard ahead < 10 else { throw VerificationError.failed("cursor trail extends ahead of its motion (\(ahead) pixels)") }
     }
 
     private static func verifyPresets(session: RecordingSession, directory: URL, duration: Double) async throws {
@@ -1364,6 +1430,99 @@ struct VerifyExport {
         }
         let frame = (candidates[0] / 640 - 0.25) / 0.5 * 239
         return frame / 30
+    }
+
+    // MARK: Keyboard shortcut overlay
+
+    /// Exports the same fixture with and without the overlay; the frames may differ only inside the
+    /// bottom-center cap row and only while the press is displayed (⌘K at 2.0 s shows 1.9–3.5 s).
+    private static func verifyShortcuts(root: URL, width: Int, height: Int, duration: Double) async throws {
+        let directory = root.appendingPathComponent("shortcut-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try await makeFixture(url: directory.appendingPathComponent("raw.mp4"), width: width, height: height, duration: duration)
+        let events = [ShortcutEvent(time: 2.0, keyCode: 40, key: "K", modifiers: .command)]
+        var session = RecordingSession(id: UUID(), createdAt: Date(), displayID: 1, width: width, height: height, duration: duration,
+                                       events: [], droppedFrames: 0, eventCaptureAvailable: true)
+        session.shortcuts = events
+        session.shortcutCaptureAvailable = true
+        try session.save(in: directory)
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+        func export(_ name: String, _ edit: ExportEdit?) async throws -> AVURLAsset {
+            let url = directory.appendingPathComponent(name)
+            try await OfflineExporter().export(session: session, directory: directory, destination: url, settings: settings, edit: edit)
+            return AVURLAsset(url: url)
+        }
+        var configuration = ShortcutOverlayConfiguration()
+        let plain = try await export("shortcuts-off.mp4", ExportEdit(shortcuts: (events, configuration)))
+        configuration.enabled = true
+        let shown = try await export("shortcuts-on.mp4", ExportEdit(shortcuts: (events, configuration)))
+        guard ExportEdit(shortcuts: (events, ShortcutOverlayConfiguration())).isEmpty else {
+            throw VerificationError.failed("a disabled shortcut overlay changes the export")
+        }
+        // Expected cap row at 1280×720 (top-left pixel coordinates): two caps, height 72, 43 px above the bottom.
+        let outputWidth = 1280.0, outputHeight = 720.0
+        let capHeight = outputHeight * configuration.sizeRatio
+        let rowWidth = capHeight * 2 + capHeight * ShortcutOverlayRenderer.gapRatio
+        let row = CGRect(x: outputWidth / 2 - rowWidth / 2, y: outputHeight - capHeight * (1 + ShortcutOverlayRenderer.bottomMarginRatio),
+                         width: rowWidth, height: capHeight)
+        for (time, visible) in [(0.5, false), (1.5, false), (2.5, true), (3.2, true), (4.5, false), (6.0, false)] {
+            let (inside, outside) = try await frameDifference(plain, shown, time: time, region: row.insetBy(dx: -24, dy: -24))
+            if visible {
+                guard inside > Int(row.width * row.height / 16 * 0.15) else {
+                    throw VerificationError.failed("shortcut overlay missing at \(time)s inside the expected cap row (\(inside) changed samples)")
+                }
+                guard outside < 30 else {
+                    throw VerificationError.failed("shortcut overlay changed \(outside) samples outside the cap row at \(time)s")
+                }
+            } else {
+                guard inside + outside < 30 else {
+                    throw VerificationError.failed("shortcut overlay visible at \(time)s, outside its display window (\(inside + outside) changed samples)")
+                }
+            }
+        }
+        // ExportEdit.load: only an enabled configuration plus captured events produce the overlay.
+        guard try ExportEdit.load(from: directory, session: session).shortcuts == nil else {
+            throw VerificationError.failed("ExportEdit.load enabled shortcuts without a configuration")
+        }
+        try configuration.save(in: directory)
+        let loaded = try ExportEdit.load(from: directory, session: session)
+        guard loaded.shortcuts?.events == events, loaded.shortcuts?.configuration == configuration else {
+            throw VerificationError.failed("ExportEdit.load ignored shortcuts-config.json")
+        }
+        var noCapture = session
+        noCapture.shortcuts = nil
+        guard try ExportEdit.load(from: directory, session: noCapture).shortcuts == nil else {
+            throw VerificationError.failed("ExportEdit.load created an overlay for a session without captured shortcuts")
+        }
+        configuration.enabled = false
+        try configuration.save(in: directory)
+        guard try ExportEdit.load(from: directory, session: session).shortcuts == nil else {
+            throw VerificationError.failed("ExportEdit.load kept a disabled shortcut overlay")
+        }
+    }
+
+    /// Counts samples (every 4th pixel) whose luma differs by more than 40 inside and outside `region` (top-left pixels).
+    private static func frameDifference(_ first: AVAsset, _ second: AVAsset, time: Double, region: CGRect) async throws -> (inside: Int, outside: Int) {
+        func rep(_ asset: AVAsset) async throws -> NSBitmapImageRep {
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            return NSBitmapImageRep(cgImage: try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image)
+        }
+        let a = try await rep(first), b = try await rep(second)
+        guard a.pixelsWide == b.pixelsWide, a.pixelsHigh == b.pixelsHigh else { throw VerificationError.failed("shortcut frames differ in size") }
+        var inside = 0, outside = 0
+        for y in stride(from: 0, to: a.pixelsHigh, by: 4) {
+            for x in stride(from: 0, to: a.pixelsWide, by: 4) {
+                guard let p = a.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      let q = b.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let lumaP = 0.299 * p.redComponent + 0.587 * p.greenComponent + 0.114 * p.blueComponent
+                let lumaQ = 0.299 * q.redComponent + 0.587 * q.greenComponent + 0.114 * q.blueComponent
+                guard abs(lumaP - lumaQ) > 40.0 / 255 else { continue }
+                if region.contains(CGPoint(x: x, y: y)) { inside += 1 } else { outside += 1 }
+            }
+        }
+        return (inside, outside)
     }
 
     /// Fully opaque cyan caption-pill pixels in the lower part of the frame (none occur in the fixture).

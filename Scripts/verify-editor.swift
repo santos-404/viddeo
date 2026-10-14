@@ -116,6 +116,32 @@ struct VerifyEditor {
         try check(try WebcamConfiguration.load(in: cameraDirectory) == withCamera.webcam, "webcam-config.json roundtrip")
         try check(try ExportEdit.load(from: cameraDirectory, session: cameraSession).webcam == withCamera.webcam, "sidecar loader reads the camera settings")
         try check(try EditorModel(session: cameraSession, directory: cameraDirectory).state.webcam == withCamera.webcam, "reopened editor keeps the camera settings")
+        // Shortcuts: only sessions with captured presses get the tab, saved file and export overlay.
+        try check(!reopened.hasShortcuts && reopened.exportEdit.shortcuts == nil, "no captured shortcuts, no overlay")
+        try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("shortcuts-config.json").path), "no shortcuts, no shortcuts-config.json")
+        let shortcutDirectory = directory.appendingPathComponent("with-shortcuts", isDirectory: true)
+        try FileManager.default.createDirectory(at: shortcutDirectory, withIntermediateDirectories: true)
+        var shortcutSession = session
+        shortcutSession.shortcuts = [ShortcutEvent(time: 1, keyCode: 8, key: "C", modifiers: .command),
+                                     ShortcutEvent(time: 4, keyCode: 53, key: "escape", modifiers: [])]
+        try shortcutSession.save(in: shortcutDirectory)
+        let shortcutEditor = try EditorModel(session: shortcutSession, directory: shortcutDirectory)
+        try check(shortcutEditor.hasShortcuts && shortcutEditor.state.shortcuts == ShortcutOverlayConfiguration() && shortcutEditor.exportEdit.shortcuts == nil,
+                  "overlay is off by default")
+        shortcutEditor.edit { $0.shortcuts.enabled = true; $0.shortcuts.sizeRatio = 0.15 }
+        let presses = ShortcutOverlayPlanner.presses(events: shortcutSession.shortcuts ?? [])
+        shortcutEditor.edit { $0.shortcuts.setHidden(true, for: presses[1]) }
+        try check(shortcutEditor.exportEdit.shortcuts?.configuration.sizeRatio == 0.15 && shortcutEditor.state.shortcuts.isHidden(presses[1]), "unsaved shortcut settings reach the export")
+        let withShortcuts = shortcutEditor.state
+        shortcutEditor.edit { $0.shortcuts.sizeRatio = 5 }
+        try check(shortcutEditor.state == withShortcuts && shortcutEditor.error != nil, "invalid shortcut size rolls back")
+        shortcutEditor.undo()
+        try check(!shortcutEditor.state.shortcuts.isHidden(presses[1]) && shortcutEditor.state.shortcuts.enabled, "hide is undoable")
+        shortcutEditor.redo()
+        try check(shortcutEditor.save(presetID: "custom-preset"), "shortcut settings saved")
+        try check(try ShortcutOverlayConfiguration.load(in: shortcutDirectory) == withShortcuts.shortcuts, "shortcuts-config.json roundtrip")
+        try check(try ExportEdit.load(from: shortcutDirectory, session: shortcutSession).shortcuts?.configuration == withShortcuts.shortcuts, "sidecar loader reads shortcuts")
+        try check(try EditorModel(session: shortcutSession, directory: shortcutDirectory).state.shortcuts == withShortcuts.shortcuts, "reopened editor keeps shortcut settings")
         let bytes = try Data(contentsOf: directory.appendingPathComponent("session.json"))
         reopened.edit { try $0.timeline.trim(segmentID: $0.timeline.segments[0].id, newStart: 1, newEnd: 3) }
         try check(reopened.save(presetID: "custom-preset"), "trim saved")

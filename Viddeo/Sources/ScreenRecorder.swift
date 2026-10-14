@@ -45,6 +45,7 @@ final class ScreenRecorder {
     private var audioOptions = (system: false, microphone: false)
     private var cursorEmbedded = true
     private var capturesTyping = false
+    private var capturesShortcuts = false
     private let webcamRecorder = WebcamRecorder()
     private var webcamActive = false
     /// Why the last recording has no (or an incomplete) camera track; read after `start` and `stop`.
@@ -53,7 +54,7 @@ final class ScreenRecorder {
     /// The camera is optional: it starts after the screen stream, so a missing device or denied
     /// permission never prevents or delays the screen recording, and is reported in `webcamWarning`.
     func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false,
-               rendersCursor: Bool = false, capturesKeystrokes: Bool = false,
+               rendersCursor: Bool = false, capturesKeystrokes: Bool = false, capturesShortcuts: Bool = false,
                capturesWebcam: Bool = false, webcamDeviceID: String? = nil) async throws {
         guard stream == nil, !isStarting, !isStopping else { throw RecorderError.alreadyRecording }
         let dimensions = try Self.captureDimensions(displayID: display.displayID)
@@ -103,9 +104,11 @@ final class ScreenRecorder {
                 configuration.sampleRate = 48_000
                 configuration.channelCount = 2
             }
-            cursorRecorder.start(displayID: display.displayID, capturesKeystrokes: capturesKeystrokes)
+            cursorRecorder.start(displayID: display.displayID, capturesKeystrokes: capturesKeystrokes,
+                                 capturesShortcuts: capturesShortcuts)
             cursorEmbedded = !rendersCursor || !cursorRecorder.isAvailable
             capturesTyping = capturesKeystrokes
+            self.capturesShortcuts = capturesShortcuts
             configuration.showsCursor = cursorEmbedded
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
 
@@ -191,6 +194,8 @@ final class ScreenRecorder {
                 cursorEmbedded: cursorEmbedded,
                 keystrokes: capturesTyping ? cursorRecorder.keystrokes(through: duration) : nil,
                 keystrokeCaptureAvailable: capturesTyping ? cursorRecorder.keystrokesWereAvailableForSession : nil,
+                shortcuts: capturesShortcuts ? cursorRecorder.shortcuts(through: duration) : nil,
+                shortcutCaptureAvailable: capturesShortcuts ? cursorRecorder.shortcutsWereAvailableForSession : nil,
                 webcam: webcam
             )
             clearSession(generation: stopGeneration)

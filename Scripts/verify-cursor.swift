@@ -19,6 +19,12 @@ struct VerifyCursor {
         try testDirectionalRotation(check)
         try testInvalidEventFiltering(check)
         try testRenderer(check)
+        try testShakeRemoval(check)
+        try testLegacyShakeKey(check)
+        try testLoopWindow(check)
+        try testStopMovementSpring(check)
+        try testTrailStrength(check)
+        try testTrailRendering(check)
         print("Cursor verified: \(check.count) checks")
     }
 
@@ -46,7 +52,8 @@ struct VerifyCursor {
         try check(c.hideWhileTypingKeyCount == 3 && c.typingWindowMs == 1800, "typing 3 keys / 1800 ms")
         try check(c.fadeOutMs == 150 && c.fadeInMs == 150, "fade 150/150 ms")
         try check(c.hideNotMovingAfterMs == nil && c.hideBlurRadius == 10, "idle hide off, blur 10")
-        try check(c.removeShakeThresholdMs == 500 && c.motionBlurAmount == 1, "declared-only fields")
+        try check(c.removeShakeThresholdPx == 500 && c.motionBlurAmount == 1, "shake 500 px, motion blur 1")
+        try check(c.loopPositionBeforeEndMs == nil && c.stopMovementInLastPartMs == 0, "loop off, stop movement 0")
         try check((try? c.validate()) != nil, "defaults validate")
     }
 
@@ -66,13 +73,19 @@ struct VerifyCursor {
         let json = try String(contentsOf: directory.appendingPathComponent("cursor-config.json"), encoding: .utf8)
         try check(json.contains("\"rotationMode\" : \"directional\""), "mode persists as a string")
 
-        var invalid = [CursorConfiguration](repeating: .init(), count: 6)
+        var invalid = [CursorConfiguration](repeating: .init(), count: 12)
         invalid[0].size = -1
         invalid[1].stiffness = .nan
         invalid[2].hideWhileTypingKeyCount = 0
         invalid[3].mass = 0
         invalid[4].hideNotMovingAfterMs = -5
         invalid[5].maxTiltDeg = 200
+        invalid[6].motionBlurAmount = 1.5
+        invalid[7].removeShakeThresholdPx = -1
+        invalid[8].loopPositionBeforeEndMs = 0
+        invalid[9].stopMovementInLastPartMs = 70_000
+        invalid[10].motionBlurAmount = -0.1
+        invalid[11].removeShakeThresholdPx = 200_000
         try check(invalid.allSatisfy { (try? $0.validate()) == nil }, "invalid values are rejected")
         var bad = CursorConfiguration()
         bad.damping = -3
@@ -207,7 +220,8 @@ struct VerifyCursor {
         let idle = CursorTimeline(events: events, keystrokes: [], duration: 7, configuration: config)
         try check(idle.state(at: 1.5).opacity == 1, "visible near a mouse event")
         try check(idle.state(at: 3).opacity == 0, "hidden after the idle threshold")
-        try check(idle.state(at: 4.5).opacity == 1, "re-shown within the threshold before the next event")
+        try check(idle.state(at: 4.5).opacity == 0, "idle hide only looks backward: hidden before the next event")
+        try check(idle.state(at: 5.5).opacity == 1, "re-shown within the threshold after an event")
         try check(idle.state(at: 6.5).opacity == 0, "hidden again after the last event")
     }
 
@@ -352,6 +366,188 @@ struct VerifyCursor {
         offscreen.x = 0.999
         offscreen.y = 0.999
         try check(renderer.image(for: offscreen)?.extent == image.extent, "edge cursor is cropped to the output")
+    }
+
+    // MARK: Shake, legacy key, loop, stop
+
+    private static func testShakeRemoval(_ check: Checker) throws {
+        let w = 1920.0, h = 1080.0
+        func filter(_ events: [CursorEvent], _ threshold: Double = 500) -> [CursorEvent] {
+            CursorEventFilter.removingShake(events, thresholdPx: threshold, sourceWidth: w, sourceHeight: h)
+        }
+        let spike = [move(1, 0.1, 0.1), move(2, 0.9, 0.9), move(3, 0.1, 0.1), move(4, 0.11, 0.1)]
+        try check(filter(spike).map(\.time) == [1, 3, 4], "an isolated spike (2400 px away from both neighbours) is dropped")
+        try check(filter(spike, 0) == spike, "threshold 0 disables")
+        try check(filter(spike, 3000) == spike, "spike below the threshold is kept")
+        let step = [move(1, 0.1, 0.5), move(2, 0.1 + 400 / w, 0.5), move(3, 0.1 + 800 / w, 0.5), move(4, 0.1 + 1200 / w, 0.5)]
+        try check(filter(step) == step, "400 px moves are kept")
+        let near = [move(1, 0.2, 0.5), move(2, 0.2 + 499 / w, 0.5), move(3, 0.2 + 998 / w, 0.5)]
+        try check(filter(near) == near, "499 px steps are not far")
+        let far = [move(1, 0.2, 0.5), move(2, 0.2 + 501 / w, 0.5), move(3, 0.2 + 1002 / w, 0.5)]
+        try check(filter(far).map(\.time) == [2, 3], "501 px steps are far from both next events")
+        let manhattanOnly = [move(1, 0.2, 0.2), move(2, 0.2 + 300 / w, 0.2 + 300 / h), move(3, 0.2 + 300 / w, 0.2 + 300 / h)]
+        try check(filter(manhattanOnly).map(\.time) == [2, 3], "300+300 px counts as 600 (Manhattan), not 424")
+        let pair = [move(1, 0.1, 0.1), CursorEvent(time: 2, x: 0.9, y: 0.9, kind: .down), move(3, 0.1, 0.1),
+                    CursorEvent(time: 4, x: 0.1, y: 0.1, kind: .up), move(5, 0.1, 0.1), CursorEvent(time: 6, x: 0.1, y: 0.1, kind: .up)]
+        try check(filter(pair).map(\.time) == [1, 3, 5, 6], "a dropped down also drops the next up, only that one")
+        let upSpike = [move(1, 0.1, 0.1), CursorEvent(time: 2, x: 0.9, y: 0.9, kind: .up), move(3, 0.1, 0.1), move(4, 0.1, 0.1)]
+        try check(filter(upSpike).map(\.time) == [1, 3, 4], "a dropped up does not start pairing")
+        let tail = [move(1, 0.1, 0.1), move(2, 0.1, 0.1), move(3, 0.9, 0.9)]
+        try check(filter(tail) == tail, "the last two events are never dropped")
+        try check(filter([]) == [] && filter([move(1, 0.5, 0.5)]).count == 1, "short inputs pass")
+        let timeline = CursorTimeline(events: spike, keystrokes: [], duration: 6, configuration: sized(48))
+        let peak = stride(from: 0.0, through: 6.0, by: 0.01).map { timeline.state(at: $0).x }.max() ?? 1
+        try check(peak < 0.2, "a filtered spike never moves the cursor (peak \(peak))")
+        var off = CursorConfiguration()
+        off.removeShakeThresholdPx = 0
+        let raw = CursorTimeline(events: spike, keystrokes: [], duration: 6, configuration: off)
+        try check((stride(from: 0.0, through: 6.0, by: 0.01).map { raw.state(at: $0).x }.max() ?? 0) > 0.3,
+                  "threshold 0 lets the spike through")
+    }
+
+    private static func testLegacyShakeKey(_ check: Checker) throws {
+        let encoder = JSONEncoder()
+        func decode(_ edit: (inout [String: Any]) -> Void) throws -> CursorConfiguration {
+            var object = try JSONSerialization.jsonObject(with: encoder.encode(CursorConfiguration())) as? [String: Any] ?? [:]
+            edit(&object)
+            return try JSONDecoder().decode(CursorConfiguration.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        let old = try decode {
+            $0["removeShakeThresholdPx"] = nil
+            $0["loopPositionBeforeEndMs"] = nil
+            $0["stopMovementInLastPartMs"] = nil
+            $0["removeShakeThresholdMs"] = 250.0
+        }
+        try check(old.removeShakeThresholdPx == 250, "old removeShakeThresholdMs key decodes into the pixel field")
+        try check(old.loopPositionBeforeEndMs == nil && old.stopMovementInLastPartMs == 0, "new keys default when absent")
+        let both = try decode { $0["removeShakeThresholdMs"] = 250.0; $0["removeShakeThresholdPx"] = 700.0 }
+        try check(both.removeShakeThresholdPx == 700, "the new key wins over the old one")
+        let empty = try JSONDecoder().decode(CursorConfiguration.self, from: Data("{}".utf8))
+        try check(empty == CursorConfiguration(), "an empty object decodes to defaults")
+        var custom = CursorConfiguration()
+        custom.loopPositionBeforeEndMs = 1500
+        custom.stopMovementInLastPartMs = 800
+        custom.removeShakeThresholdPx = 300
+        custom.motionBlurAmount = 0.4
+        try check(try JSONDecoder().decode(CursorConfiguration.self, from: encoder.encode(custom)) == custom,
+                  "new fields roundtrip")
+        let json = String(decoding: try encoder.encode(custom), as: UTF8.self)
+        try check(!json.contains("removeShakeThresholdMs") && json.contains("removeShakeThresholdPx"), "only the new key is written")
+    }
+
+    private static func testLoopWindow(_ check: Checker) throws {
+        let events = [move(0.5, 0.2, 0.2), move(2, 0.3, 0.3), move(5, 0.35, 0.35)]
+        let window = CursorEventFilter.loopWindow(events, duration: 6, loopMs: 2000)
+        try check(window.map(\.time) == [0, 2, 2.001], "window drops later events, re-times the first, appends the return")
+        try check(window.last.map { $0.x == 0.2 && $0.y == 0.2 && $0.kind == .move } == true, "return event copies the first position")
+        try check(CursorEventFilter.loopWindow(events, duration: 6, loopMs: nil) == events, "loop off leaves events alone")
+        let late = CursorEventFilter.loopWindow([move(5, 0.3, 0.3)], duration: 6, loopMs: 5500)
+        try check(late.map(\.time) == [0, 0.001], "no event in the window: the first event is used")
+        var config = CursorConfiguration()
+        config.loopPositionBeforeEndMs = 2000
+        let looped = CursorTimeline(events: events, keystrokes: [], duration: 6, configuration: config)
+        let startX = looped.state(at: 0).x
+        try check(abs(startX - 0.2) < 1e-9 && looped.state(at: 0.3).opacity == 1, "cursor is at its start position from frame 0")
+        try check(abs(looped.state(at: 6).x - 0.2) < 0.5 / 1920 && abs(looped.state(at: 6).y - 0.2) < 0.5 / 1080,
+                  "cursor is back within 0.5 px of the start at the end")
+        let open = CursorTimeline(events: events, keystrokes: [], duration: 6)
+        try check(abs(open.state(at: 6).x - 0.35) < 0.001, "without a loop window the last event holds")
+        try check(open.state(at: 0.2).opacity == 0, "without a loop window the cursor still waits for its first event")
+    }
+
+    private static func testStopMovementSpring(_ check: Checker) throws {
+        let base = [move(0.5, 0.3, 0.5), move(3.0, 0.5, 0.5)]
+        let click = base + [CursorEvent(time: 3.1, x: 0.5, y: 0.5, kind: .down), CursorEvent(time: 3.6, x: 0.5, y: 0.5, kind: .up)]
+        var stop = CursorConfiguration()
+        stop.stopMovementInLastPartMs = 3000   // stopTime = 6 - 3 = 3 s
+        let plain = CursorTimeline(events: click, keystrokes: [], duration: 6)
+        let stopped = CursorTimeline(events: click, keystrokes: [], duration: 6, configuration: stop)
+        let times = stride(from: 3.0, through: 6.0, by: 0.01)
+        try check(stride(from: 0.0, to: 3.0, by: 0.01).allSatisfy { plain.state(at: $0).x == stopped.state(at: $0).x },
+                  "nothing changes before duration - N")
+        try check((times.map { plain.state(at: $0).x }.max() ?? 0) > 0.52, "configured spring overshoots (under-damped)")
+        try check((times.map { stopped.state(at: $0).x }.max() ?? 1) <= 0.5 + 1e-4, "click spring after the stop time does not overshoot")
+        let quiet = CursorTimeline(events: base, keystrokes: [], duration: 6, configuration: stop)
+        let quietPlain = CursorTimeline(events: base, keystrokes: [], duration: 6)
+        try check(times.allSatisfy { quiet.state(at: $0).x == quietPlain.state(at: $0).x },
+                  "no click within 175 ms of the stop time keeps the configured spring")
+        let drag = [move(0.5, 0.3, 0.5), CursorEvent(time: 2, x: 0.3, y: 0.5, kind: .down), move(3.0, 0.5, 0.5)]
+        let dragging = CursorTimeline(events: drag, keystrokes: [], duration: 6, configuration: stop)
+        try check((times.map { dragging.state(at: $0).x }.max() ?? 1) <= 0.5 + 1e-4, "a drag in progress at the stop time uses the snap spring")
+        try check(CursorTimeline(events: click, keystrokes: [], duration: 6, configuration: CursorConfiguration())
+                    .state(at: 4) == plain.state(at: 4), "0 changes nothing")
+    }
+
+    // MARK: Motion blur trail
+
+    private static func testTrailStrength(_ check: Checker) throws {
+        let events = sweep(from: 0.1, speedPxPerMs: 0.2, start: 0.2, end: 5, width: 1920)
+        let timeline = CursorTimeline(events: events, keystrokes: [], duration: 6)
+        func length(_ timeline: CursorTimeline, fps: Double, at time: Double = 4) -> Double {
+            let trail = timeline.trail(at: time, fps: fps)
+            return (trail.now.x - trail.start.x) * 1920
+        }
+        try check(timeline.trail(at: 4, fps: 30).strength == 0.5 && timeline.trail(at: 4, fps: 60).strength == 1 &&
+                  timeline.trail(at: 4, fps: 120).strength == 2, "strength = amount x fps/60")
+        // 0.2 px/ms = 200 px/s: a 1/60 s shutter is 3.33 px at any fps.
+        let shutter = 200.0 / 60
+        for fps in [24.0, 30, 60, 120] {
+            let measured = length(timeline, fps: fps)
+            try check(abs(measured - shutter) < 0.03 * shutter, "shutter is 1/60 s at \(Int(fps)) fps (\(measured) px vs \(shutter))")
+        }
+        var half = CursorConfiguration()
+        half.motionBlurAmount = 0.5
+        let halfTimeline = CursorTimeline(events: events, keystrokes: [], duration: 6, configuration: half)
+        try check(abs(length(halfTimeline, fps: 30) - shutter / 2) < 0.03 * shutter &&
+                  abs(length(halfTimeline, fps: 60) - shutter / 2) < 0.03 * shutter, "amount 0.5 halves the shutter at 30 and 60 fps")
+        var zero = CursorConfiguration()
+        zero.motionBlurAmount = 0
+        let zeroTimeline = CursorTimeline(events: events, keystrokes: [], duration: 6, configuration: zero)
+        let none = zeroTimeline.trail(at: 4, fps: 60)
+        try check(none.strength == 0 && none.start == none.now, "amount 0 gives no trail")
+        let still = CursorTimeline(events: events, keystrokes: [], duration: 14).trail(at: 13.9, fps: 60)
+        try check(abs(still.now.x - still.start.x) < 1e-6 && abs(still.now.y - still.start.y) < 1e-12,
+                  "a stationary cursor has a zero-length trail")
+        let hidden = timeline.trail(at: 0.05, fps: 60)
+        try check(hidden.strength == 0 && hidden.start == hidden.now, "a hidden cursor has no trail")
+        let early = timeline.trail(at: 0.3, fps: 30)
+        try check(early.now.x.isFinite && early.start.x.isFinite, "the trail clamps before time 0")
+        let direct = timeline.trail(at: 4, frameDuration: 1.0 / 60, strength: 0.5)
+        let before = timeline.state(at: 4 - 1.0 / 60)
+        try check(abs(direct.start.x - (direct.now.x + (before.x - direct.now.x) * 0.5)) < 1e-12,
+                  "start = lerp(now, before, strength)")
+        try check(direct.start.opacity == direct.now.opacity && direct.start.blurRadius == direct.now.blurRadius,
+                  "opacity and hide blur come from now")
+    }
+
+    private static func testTrailRendering(_ check: Checker) throws {
+        let width = 1280, height = 720
+        let renderer = CursorRenderer(outputSize: CGSize(width: width, height: height))
+        let now = CursorState(x: 700.5 / 1280, y: 360.5 / 720, scale: 1, rotationRadians: 0, opacity: 1, blurRadius: 0)
+        var start = now
+        start.x = (700.5 - 60) / 1280
+        let trail = CursorTrail(now: now, start: start, strength: 1)
+        let sharp = try render(renderer.image(for: now), width: width, height: height)
+        let sharpBox = boundingBox(sharp, width: width, height: height, threshold: 0.02)
+        for quality in [CursorBlurQuality.export, .preview] {
+            let bytes = try render(renderer.image(for: trail, quality: quality), width: width, height: height)
+            let box = boundingBox(bytes, width: width, height: height, threshold: 0.02)
+            let n = Double(min(quality.maxSamples, Int(ceil(60 / quality.spanPixels))))
+            try check(abs(box.minX - (sharpBox.minX - 60 * (1 - 0.5 / n))) < 6,
+                      "trail extends behind the motion (minX \(box.minX), n \(Int(n)))")
+            try check(box.maxX <= sharpBox.maxX + 1 && box.maxX >= sharpBox.maxX - 60 * 0.5 / n - 3,
+                      "trail does not extend ahead of the cursor")
+            try check(abs(box.minY - sharpBox.minY) <= 4 && abs(box.height - sharpBox.height) <= 8, "trail is horizontal only")
+            func mass(_ bytes: [UInt8]) -> Double { stride(from: 3, to: bytes.count, by: 4).reduce(0.0) { $0 + Double(bytes[$1]) / 255 } }
+            try check(abs(mass(bytes) / mass(sharp) - 1) < 0.03, "stamps sum to the original alpha (\(mass(bytes) / mass(sharp)))")
+        }
+        let still = CursorTrail(now: now, start: now, strength: 1)
+        try check(try render(renderer.image(for: still), width: width, height: height) == sharp, "stationary trail is bit-identical to the static image")
+        let off = CursorTrail(now: now, start: start, strength: 0)
+        try check(try render(renderer.image(for: off), width: width, height: height) == sharp, "strength 0 is bit-identical to the static image")
+        var hidden = now
+        hidden.opacity = 0
+        try check(renderer.image(for: CursorTrail(now: hidden, start: start, strength: 1)) == nil, "invisible cursor draws nothing")
     }
 
     // MARK: Helpers

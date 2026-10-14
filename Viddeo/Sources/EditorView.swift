@@ -29,6 +29,7 @@ struct EditorView: View {
                 captions.tabItem { Text("Captions") }
                 audio.tabItem { Text("Audio") }
                 if editor.session.webcam != nil { camera.tabItem { Text("Camera") } }
+                if editor.hasShortcuts { shortcuts.tabItem { Text("Shortcuts") } }
             }
             .frame(minHeight: 300)
             if editor.isWorking { ProgressView().controlSize(.small) }
@@ -158,6 +159,42 @@ struct EditorView: View {
                     }
                 }
             }
+        }.padding(12)
+    }
+
+    private var shortcuts: some View {
+        let presses = ShortcutOverlayPlanner.presses(events: editor.session.shortcuts ?? [],
+                                                     showSingleLetters: editor.state.shortcuts.showSingleLetters)
+        return VStack(alignment: .leading, spacing: 10) {
+            Toggle("Show shortcuts", isOn: Binding(get: { editor.state.shortcuts.enabled }, set: { enabled in
+                editor.edit { $0.shortcuts.enabled = enabled }
+            }))
+            HStack {
+                Text("Size")
+                Slider(value: Binding(get: { editor.state.shortcuts.sizeRatio }, set: { ratio in
+                    editor.edit({ $0.shortcuts.sizeRatio = ratio }, key: "shortcuts-size")
+                }), in: 0.05...0.2)
+                Text("\(Int((editor.state.shortcuts.sizeRatio * 100).rounded())) % of height")
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading) {
+                    ForEach(presses) { press in
+                        HStack {
+                            Text("\((press.firstKeyDownMs / 1000).formatted(.number.precision(.fractionLength(2)))) s")
+                                .monospacedDigit().frame(width: 70, alignment: .leading)
+                            Text(press.glyphString).font(.title3).frame(minWidth: 90, alignment: .leading)
+                            if press.count > 1 { Text("× \(press.count)").font(.caption).foregroundStyle(.secondary) }
+                            Spacer()
+                            Toggle("Hide", isOn: Binding(get: { editor.state.shortcuts.isHidden(press) }, set: { hidden in
+                                editor.edit { $0.shortcuts.setHidden(hidden, for: press) }
+                            }))
+                        }
+                    }
+                }
+            }
+            Text("Only shortcuts were recorded (⌘, ⌥ or ⌃ combinations and keys like Esc, Return or arrows), never typed text.")
+                .font(.caption).foregroundStyle(.secondary)
         }.padding(12)
     }
 

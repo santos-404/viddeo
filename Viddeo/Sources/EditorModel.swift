@@ -10,6 +10,7 @@ struct EditorState: Sendable, Equatable {
     var captionConfiguration: CaptionConfiguration
     var audio: AudioMixConfiguration
     var webcam: WebcamConfiguration
+    var shortcuts: ShortcutOverlayConfiguration
 }
 
 @MainActor
@@ -41,7 +42,8 @@ final class EditorModel {
             captionConfiguration: try CaptionConfiguration.load(in: directory),
             audio: manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path)
                 ? try AudioMixConfiguration.load(in: directory) : .editorDefault,
-            webcam: try WebcamConfiguration.load(in: directory))
+            webcam: try WebcamConfiguration.load(in: directory),
+            shortcuts: try ShortcutOverlayConfiguration.load(in: directory))
         self.session = session
         self.directory = directory
         self.project = project
@@ -55,12 +57,15 @@ final class EditorModel {
     var isDirty: Bool { state != savedState || project.lastSavedAt == nil }
     var canUndo: Bool { history.canUndo }
     var canRedo: Bool { history.canRedo }
+    /// The Shortcuts tab exists only when the recording captured shortcut presses.
+    var hasShortcuts: Bool { session.shortcuts?.isEmpty == false }
     var selectedSegment: TimelineSegment? { state.timeline.segments.first { $0.id == selectedSegmentID } }
     var exportEdit: ExportEdit {
         ExportEdit(timeline: state.timeline, stage: state.stageEnabled ? state.stage : nil,
                    captions: state.captionConfiguration.enabled && !state.captions.cues.isEmpty
                     ? (state.captions, state.captionConfiguration) : nil,
-                   audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam)
+                   audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam,
+                   shortcuts: session.shortcuts.map { ($0, state.shortcuts) })
     }
 
     /// Failed edits leave both state and history intact.
@@ -75,6 +80,7 @@ final class EditorModel {
             try candidate.captionConfiguration.validate()
             try candidate.audio.validate()
             try candidate.webcam.validate()
+            try candidate.shortcuts.validate()
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
             reconcileSelection()
@@ -110,6 +116,7 @@ final class EditorModel {
             try state.captionConfiguration.save(in: directory)
             try state.audio.save(in: directory)
             if session.webcam != nil { try state.webcam.save(in: directory) }
+            if hasShortcuts { try state.shortcuts.save(in: directory) }
             try updated.save(to: directory)
             project = updated
             savedState = state

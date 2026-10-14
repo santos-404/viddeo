@@ -42,9 +42,17 @@ struct CursorConfiguration: Codable, Sendable, Equatable {
     var fadeInMs = 150.0
     var hideNotMovingAfterMs: Double? = nil
     var hideBlurRadius = 10.0
-    /// Declared only: the reference shake-removal algorithm is unknown and not implemented.
-    var removeShakeThresholdMs = 500.0
-    /// Declared only: motion blur is not rendered yet.
+    /// Shake removal: Manhattan distance |dx|+|dy| in recording pixels; an event farther than this
+    /// from both of the next two events is dropped. 0 disables. (Older files call this
+    /// `removeShakeThresholdMs`; it was never milliseconds and the old key is still decoded.)
+    var removeShakeThresholdPx = 500.0
+    /// Loop window: events in the last N ms are ignored and the cursor glides back to its first
+    /// position (a copy of the first event is appended 1 ms after the last). nil = off in viddeo
+    /// (the reference always appends the return event; see docs/research/cursor-motion.md).
+    var loopPositionBeforeEndMs: Double? = nil
+    /// Movement spring choice after `duration - N` ms (see `CursorTimeline`). 0 = off.
+    var stopMovementInLastPartMs = 0.0
+    /// Motion blur 0...1: strength = amount x fps/60, so the shutter is amount/60 s at any fps.
     var motionBlurAmount = 1.0
 
     /// Values of 12 or less are icon multipliers in the reference format (×16).
@@ -57,7 +65,8 @@ struct CursorConfiguration: Codable, Sendable, Equatable {
                       alignRatePerPx, speedSaturationPxPerMs, angularDampingMs, maxTurnRateDegPerMs,
                       maxFromNeutralDeg, minTravelPx, neutralPullHeadingDeg, directionalStiffness,
                       directionalDamping, directionalMass, typingWindowMs, fadeOutMs, fadeInMs,
-                      hideBlurRadius, removeShakeThresholdMs, motionBlurAmount, hideNotMovingAfterMs ?? 1]
+                      hideBlurRadius, removeShakeThresholdPx, stopMovementInLastPartMs, motionBlurAmount,
+                      hideNotMovingAfterMs ?? 1, loopPositionBeforeEndMs ?? 1]
         let springs = [(stiffness, damping, mass), (tiltStiffness, tiltDamping, tiltMass),
                        (directionalStiffness, directionalDamping, directionalMass)]
         guard values.allSatisfy(\.isFinite), size > 0, effectiveSize <= 512,
@@ -76,8 +85,9 @@ struct CursorConfiguration: Codable, Sendable, Equatable {
               typingWindowMs > 0, typingWindowMs <= 60_000,
               (0...10_000).contains(fadeOutMs), (0...10_000).contains(fadeInMs),
               hideNotMovingAfterMs.map({ $0 > 0 && $0 <= 3_600_000 }) ?? true,
-              (0...100).contains(hideBlurRadius), (0...60_000).contains(removeShakeThresholdMs),
-              (0...10).contains(motionBlurAmount)
+              (0...100).contains(hideBlurRadius), (0...100_000).contains(removeShakeThresholdPx),
+              loopPositionBeforeEndMs.map({ $0 > 0 && $0 <= 3_600_000 }) ?? true,
+              (0...60_000).contains(stopMovementInLastPartMs), (0...1).contains(motionBlurAmount)
         else { throw CursorError.invalidConfiguration }
     }
 
@@ -93,6 +103,63 @@ struct CursorConfiguration: Codable, Sendable, Equatable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self).write(to: directory.appendingPathComponent("cursor-config.json"), options: .atomic)
+    }
+}
+
+extension CursorConfiguration {
+    private enum LegacyKeys: String, CodingKey {
+        case removeShakeThresholdMs
+    }
+
+    /// Tolerant decoding: missing keys keep their defaults, and the pre-rename shake key is read.
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func read<T: Decodable>(_ key: CodingKeys, _ path: WritableKeyPath<Self, T>) throws {
+            if let value = try c.decodeIfPresent(T.self, forKey: key) { self[keyPath: path] = value }
+        }
+        try read(.hide, \.hide)
+        try read(.size, \.size)
+        try read(.smoothing, \.smoothing)
+        try read(.stiffness, \.stiffness)
+        try read(.damping, \.damping)
+        try read(.mass, \.mass)
+        try read(.pressedScale, \.pressedScale)
+        try read(.rotationMode, \.rotationMode)
+        try read(.rotateOnXMovementRatio, \.rotateOnXMovementRatio)
+        try read(.velocitySmoothingMs, \.velocitySmoothingMs)
+        try read(.tiltDegPerVelocity, \.tiltDegPerVelocity)
+        try read(.maxTiltDeg, \.maxTiltDeg)
+        try read(.startupCalmMs, \.startupCalmMs)
+        try read(.entryTeleportSpeedPxPerMs, \.entryTeleportSpeedPxPerMs)
+        try read(.tiltStiffness, \.tiltStiffness)
+        try read(.tiltDamping, \.tiltDamping)
+        try read(.tiltMass, \.tiltMass)
+        try read(.alignRatePerPx, \.alignRatePerPx)
+        try read(.speedSaturationPxPerMs, \.speedSaturationPxPerMs)
+        try read(.angularDampingMs, \.angularDampingMs)
+        try read(.maxTurnRateDegPerMs, \.maxTurnRateDegPerMs)
+        try read(.maxFromNeutralDeg, \.maxFromNeutralDeg)
+        try read(.minTravelPx, \.minTravelPx)
+        try read(.neutralPullHeadingDeg, \.neutralPullHeadingDeg)
+        try read(.directionalStiffness, \.directionalStiffness)
+        try read(.directionalDamping, \.directionalDamping)
+        try read(.directionalMass, \.directionalMass)
+        try read(.hideWhileTypingKeyCount, \.hideWhileTypingKeyCount)
+        try read(.typingWindowMs, \.typingWindowMs)
+        try read(.fadeOutMs, \.fadeOutMs)
+        try read(.fadeInMs, \.fadeInMs)
+        try read(.hideNotMovingAfterMs, \.hideNotMovingAfterMs)
+        try read(.hideBlurRadius, \.hideBlurRadius)
+        try read(.loopPositionBeforeEndMs, \.loopPositionBeforeEndMs)
+        try read(.stopMovementInLastPartMs, \.stopMovementInLastPartMs)
+        try read(.motionBlurAmount, \.motionBlurAmount)
+        if let value = try c.decodeIfPresent(Double.self, forKey: .removeShakeThresholdPx) {
+            removeShakeThresholdPx = value
+        } else if let value = try decoder.container(keyedBy: LegacyKeys.self)
+            .decodeIfPresent(Double.self, forKey: .removeShakeThresholdMs) {
+            removeShakeThresholdPx = value
+        }
     }
 }
 
@@ -112,6 +179,58 @@ struct CursorState: Sendable, Equatable {
     var blurRadius: Double
 }
 
+/// Cursor state now and one frame earlier, blended by the blur strength: the trail runs from
+/// `start` to `now` (it only looks backwards in time). `start == now` when strength is 0.
+struct CursorTrail: Sendable, Equatable {
+    var now: CursorState
+    var start: CursorState
+    var strength: Double
+}
+
+/// Input transforms applied before the cursor is animated. Pure and deterministic.
+enum CursorEventFilter {
+    /// Shake removal, as in the reference: one pass; an event is dropped when both of the next two
+    /// events are farther than `thresholdPx` (Manhattan, recording pixels). A dropped `.down` also
+    /// drops the next `.up`. Threshold 0 (or less) returns the input.
+    static func removingShake(_ events: [CursorEvent], thresholdPx: Double,
+                              sourceWidth: Double, sourceHeight: Double) -> [CursorEvent] {
+        guard thresholdPx > 0, events.count > 1 else { return events }
+        func far(_ a: CursorEvent, _ b: CursorEvent) -> Bool {
+            abs(a.x - b.x) * sourceWidth + abs(a.y - b.y) * sourceHeight > thresholdPx
+        }
+        var result: [CursorEvent] = []
+        var dropNextUp = false
+        for index in events.indices {
+            let event = events[index]
+            if dropNextUp && event.kind == .up {
+                dropNextUp = false
+                continue
+            }
+            if index + 2 < events.count, far(event, events[index + 1]), far(event, events[index + 2]) {
+                if event.kind == .down { dropNextUp = true }
+                continue
+            }
+            result.append(event)
+        }
+        return result
+    }
+
+    /// Loop window: ignores events after `duration - loopMs`, re-times the first event to 0 and
+    /// appends a `.move` copy of its position 1 ms after the last kept event, so the position
+    /// spring glides back to the start. Without events in the window the first event is used.
+    /// (The copy is a move, not the first event's kind, so a first `.down` is not pressed twice.)
+    static func loopWindow(_ events: [CursorEvent], duration: Double, loopMs: Double?) -> [CursorEvent] {
+        guard let loopMs, let firstEvent = events.first else { return events }
+        let end = max(0, duration - loopMs / 1000)
+        var window = events.filter { $0.time <= end }
+        if window.isEmpty { window = [firstEvent] }
+        window[0].time = 0
+        let last = window[window.count - 1].time
+        window.append(CursorEvent(time: last + 0.001, x: window[0].x, y: window[0].y, kind: .move))
+        return window
+    }
+}
+
 /// Pure offline cursor animation. Samples are precomputed with fixed substeps, so seeks in
 /// any order return identical states.
 struct CursorTimeline: Sendable {
@@ -120,6 +239,11 @@ struct CursorTimeline: Sendable {
     private static let pressStiffness = 900.0
     private static let pressDamping = 60.0
     private static let pressMass = 1.0
+    // The reference's click/drag springs are unknown (their constants live in an unextracted
+    // module). After `stopMovementInLastPartMs` viddeo uses the press spring for both.
+    private static let snapWindow = 0.175
+
+    private let motionBlurAmount: Double
 
     private let samples: [CursorState]
     private let firstEventTime: Double?
@@ -135,18 +259,22 @@ struct CursorTimeline: Sendable {
         let width = sourceWidth.isFinite && sourceWidth > 0 ? sourceWidth : 1920
         let height = sourceHeight.isFinite && sourceHeight > 0 ? sourceHeight : 1080
         // Stable order keeps same-time down/up pairs in recorded order.
-        let events = events.enumerated().filter { _, event in
+        var events = events.enumerated().filter { _, event in
             event.time.isFinite && event.x.isFinite && event.y.isFinite &&
             event.time >= 0 && event.time <= duration &&
             (0...1).contains(event.x) && (0...1).contains(event.y)
         }.sorted { $0.element.time < $1.element.time || ($0.element.time == $1.element.time && $0.offset < $1.offset) }
             .map(\.element)
+        events = CursorEventFilter.removingShake(events, thresholdPx: config.removeShakeThresholdPx,
+                                                 sourceWidth: width, sourceHeight: height)
+        events = CursorEventFilter.loopWindow(events, duration: duration, loopMs: config.loopPositionBeforeEndMs)
         let eventTimes = events.map(\.time)
         let keyTimes = keystrokes.map(\.time)
             .filter { $0.isFinite && $0 >= 0 && $0 <= duration }.sorted()
         let first = events.first
         firstEventTime = first?.time
         hiddenBlurRadius = config.hideBlurRadius
+        motionBlurAmount = config.motionBlurAmount
 
         let directional = config.rotationMode == .directional
         let rotationSpring = directional
@@ -159,6 +287,17 @@ struct CursorTimeline: Sendable {
         let substeps = Int(ceil(1 / fps / maxStep))
         let dt = 1 / fps / Double(substeps)
         let frameMs = 1000 / fps
+        let movementSpring = (config.stiffness, config.damping, config.mass)
+        let snapSpring = (Self.pressStiffness, Self.pressDamping, Self.pressMass)
+        // Reference: after stopTime the spring is chosen from the conditions at stopTime (a click
+        // within 175 ms after it, or a drag in progress), not from the current time.
+        let stopTime = duration - config.stopMovementInLastPartMs / 1000
+        let stopSpring: (Double, Double, Double) = {
+            guard config.stopMovementInLastPartMs > 0, config.smoothing else { return movementSpring }
+            let clickSoon = events.contains { $0.kind != .move && $0.time >= stopTime && $0.time <= stopTime + Self.snapWindow }
+            let dragging = events.last { $0.time <= stopTime && $0.kind != .move }?.kind == .down
+            return clickSoon || dragging ? snapSpring : movementSpring
+        }()
 
         var stepCursor = EventCursor(start: first)
         var frameCursor = EventCursor(start: first)
@@ -233,8 +372,9 @@ struct CursorTimeline: Sendable {
                 for step in 0..<substeps {
                     stepCursor.advance(to: start + Double(step) * dt, in: events)
                     if config.smoothing {
-                        x.advance(to: stepCursor.x, dt: dt, spring: (config.stiffness, config.damping, config.mass))
-                        y.advance(to: stepCursor.y, dt: dt, spring: (config.stiffness, config.damping, config.mass))
+                        let spring = start + Double(step) * dt >= stopTime ? stopSpring : movementSpring
+                        x.advance(to: stepCursor.x, dt: dt, spring: spring)
+                        y.advance(to: stepCursor.y, dt: dt, spring: spring)
                     }
                     press.advance(to: stepCursor.pressed ? config.pressedScale : 1, dt: dt,
                                   spring: (Self.pressStiffness, Self.pressDamping, Self.pressMass))
@@ -252,8 +392,9 @@ struct CursorTimeline: Sendable {
                 visible = false
             }
             if visible, let idle = config.hideNotMovingAfterMs {
-                let lower = Self.lowerBound(eventTimes, time - idle / 1000)
-                visible = lower < eventTimes.count && eventTimes[lower] <= time + idle / 1000
+                // Reference: only events at or before `time` keep the cursor visible.
+                let last = Self.upperBound(eventTimes, time)
+                visible = last > 0 && time - eventTimes[last - 1] <= idle / 1000
             }
             let fade = visible ? config.fadeInMs : config.fadeOutMs
             let change = fade > 0 ? frameMs / fade : 1
@@ -287,6 +428,28 @@ struct CursorTimeline: Sendable {
         return state
     }
 
+    /// Shutter trail at `time`: `before` is the state one frame earlier and the trail starts at
+    /// `lerp(now, before, strength)`. Strength is 0 while the cursor is hidden or `strength` is 0.
+    func trail(at time: Double, frameDuration: Double, strength: Double) -> CursorTrail {
+        let now = state(at: time)
+        guard strength.isFinite, strength > 0, frameDuration.isFinite, frameDuration > 0,
+              now.opacity > 0.001 else { return CursorTrail(now: now, start: now, strength: 0) }
+        let before = state(at: max(0, time - frameDuration))
+        func mix(_ a: Double, _ b: Double) -> Double { a + (b - a) * strength }
+        var start = now
+        start.x = mix(now.x, before.x)
+        start.y = mix(now.y, before.y)
+        start.scale = mix(now.scale, before.scale)
+        start.rotationRadians = mix(now.rotationRadians, before.rotationRadians)
+        return CursorTrail(now: now, start: start, strength: strength)
+    }
+
+    /// `strength = motionBlurAmount x fps / 60`, so `strength / fps = amount / 60` s at any fps.
+    func trail(at time: Double, fps: Double) -> CursorTrail {
+        guard fps.isFinite, fps > 0 else { return trail(at: time, frameDuration: 0, strength: 0) }
+        return trail(at: time, frameDuration: 1 / fps, strength: motionBlurAmount * fps / 60)
+    }
+
     /// Reference rule: enough key presses inside the window and no pointer event after the last key.
     private static func isTyping(at time: Double, keys: [Double], events: [Double],
                                  configuration: CursorConfiguration) -> Bool {
@@ -302,15 +465,6 @@ struct CursorTimeline: Sendable {
         var value = fmod(degrees + 180, 360)
         if value < 0 { value += 360 }
         return value - 180
-    }
-
-    private static func lowerBound(_ values: [Double], _ value: Double) -> Int {
-        var low = 0, high = values.count
-        while low < high {
-            let mid = (low + high) / 2
-            if values[mid] < value { low = mid + 1 } else { high = mid }
-        }
-        return low
     }
 
     private static func upperBound(_ values: [Double], _ value: Double) -> Int {

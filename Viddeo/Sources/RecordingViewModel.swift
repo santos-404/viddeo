@@ -23,6 +23,7 @@ final class RecordingViewModel {
     var showsClickEffects = true
     var rendersCursor = true
     var capturesTypingTiming = false
+    var capturesShortcuts = false
     var capturesWebcam = false
     var selectedDisplayID: UInt32?
     private(set) var isRefreshing = false
@@ -146,6 +147,7 @@ final class RecordingViewModel {
                                          capturesSystemAudio: capturesSystemAudio,
                                          capturesMicrophone: capturesMicrophone,
                                          rendersCursor: rendersCursor, capturesKeystrokes: rendersCursor && capturesTypingTiming,
+                                         capturesShortcuts: capturesShortcuts,
                                          capturesWebcam: capturesWebcam)
                 guard phase == .starting else { return }
                 activeDirectory = directory
@@ -193,6 +195,9 @@ final class RecordingViewModel {
                 if let editorError { warnings.append(editorError) }
                 if completed.keystrokeCaptureAvailable == false {
                     warnings.append("Typing timing was unavailable or interrupted. Hide-while-typing needs Input Monitoring permission and a new recording.")
+                }
+                if completed.shortcutCaptureAvailable == false {
+                    warnings.append("Keyboard shortcuts were unavailable or interrupted. Shortcut capture needs Input Monitoring permission and a new recording.")
                 }
                 operationError = warnings.isEmpty ? nil : warnings.joined(separator: "\n")
             } catch {

@@ -21,7 +21,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
-  Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
   Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift Viddeo/Sources/SilenceDetector.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
@@ -77,6 +77,18 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-webcam
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
+  Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
+  Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift Viddeo/Sources/SilenceDetector.swift \
+  Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
+  Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
+  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/ShortcutOverlay.swift Scripts/verify-color.swift \
+  -o .build/verify-color
+.build/verify-color
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/AudioProcessing.swift \
   Viddeo/Sources/ClickSounds.swift Scripts/verify-audio-processing.swift \
   -o .build/verify-audio-processing
@@ -91,7 +103,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
-  Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
   Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift Viddeo/Sources/EditHistory.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
@@ -109,7 +121,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
-  Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
+  Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
   Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamOverlay.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift Viddeo/Sources/EditHistory.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/StageRenderer.swift \
@@ -117,3 +129,8 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
   Viddeo/Sources/EditorModel.swift Viddeo/Sources/EditorPreview.swift Scripts/verify-preview.swift -o .build/verify-preview
 .build/verify-preview
+
+xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ShortcutOverlay.swift \
+  Scripts/verify-shortcuts.swift -o .build/verify-shortcuts
+.build/verify-shortcuts

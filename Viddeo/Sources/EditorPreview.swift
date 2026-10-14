@@ -213,6 +213,7 @@ struct EditorPreview: View {
         var captions: CaptionTrack
         var captionConfiguration: CaptionConfiguration
         var webcam: WebcamConfiguration
+        var shortcuts: ShortcutOverlayConfiguration
         var settings: ExportSettings
         var showsClickEffects: Bool
     }
@@ -220,7 +221,7 @@ struct EditorPreview: View {
     private var key: Key {
         Key(timeline: editor.state.timeline, stage: editor.state.stage, stageEnabled: editor.state.stageEnabled,
             captions: editor.state.captions, captionConfiguration: editor.state.captionConfiguration,
-            webcam: editor.state.webcam, settings: settings, showsClickEffects: showsClickEffects)
+            webcam: editor.state.webcam, shortcuts: editor.state.shortcuts, settings: settings, showsClickEffects: showsClickEffects)
     }
 
     var body: some View {
