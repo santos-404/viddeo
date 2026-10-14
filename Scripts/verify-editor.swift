@@ -116,6 +116,29 @@ struct VerifyEditor {
         try check(try WebcamConfiguration.load(in: cameraDirectory) == withCamera.webcam, "webcam-config.json roundtrip")
         try check(try ExportEdit.load(from: cameraDirectory, session: cameraSession).webcam == withCamera.webcam, "sidecar loader reads the camera settings")
         try check(try EditorModel(session: cameraSession, directory: cameraDirectory).state.webcam == withCamera.webcam, "reopened editor keeps the camera settings")
+        // Layout changes: add at a time, set the layout, undo, reject overlaps and short items, persist.
+        let layoutEditor = try EditorModel(session: cameraSession, directory: cameraDirectory)
+        layoutEditor.edit { try $0.webcam.addLayoutItem(layout: .splitScreen, atMs: 1000, sourceDurationMs: cameraSession.duration * 1000) }
+        try check(layoutEditor.state.webcam.layoutItems.count == 1 && layoutEditor.error == nil, "layout change added")
+        try check(layoutEditor.exportEdit.webcam?.layout(atMs: 1500) == .splitScreen, "the layout change reaches the export")
+        let itemID = layoutEditor.state.webcam.layoutItems[0].id
+        layoutEditor.edit { $0.webcam.layoutItems[0].layout = .cutoutCamera }
+        try check(layoutEditor.state.webcam.layoutItems[0].layout == .cutoutCamera, "layout change set")
+        layoutEditor.edit { try $0.webcam.addLayoutItem(layout: .splitScreen, atMs: 1200, sourceDurationMs: 8000) }
+        try check(layoutEditor.state.webcam.layoutItems.count == 1 && layoutEditor.error != nil, "an overlapping layout change is rejected")
+        layoutEditor.edit { $0.webcam.layoutItems[0].endMs = $0.webcam.layoutItems[0].startMs + 100 }
+        try check(layoutEditor.state.webcam.layoutItems[0].endMs > 1400 && layoutEditor.error != nil, "a layout change under 500 ms is rejected")
+        layoutEditor.undo()
+        try check(layoutEditor.state.webcam.layoutItems[0].layout == .splitScreen, "layout change undo")
+        layoutEditor.redo()
+        try check(layoutEditor.save(presetID: "custom-preset"), "layout changes saved")
+        try check(try WebcamConfiguration.load(in: cameraDirectory).layoutItems.map(\.id) == [itemID], "webcam-config.json keeps the layout changes")
+        let reloaded = try EditorModel(session: cameraSession, directory: cameraDirectory)
+        try check(reloaded.state.webcam.layoutItems.first?.layout == .cutoutCamera, "reopened editor keeps the layout changes")
+        reloaded.edit { $0.webcam.removeLayoutItem(id: itemID) }
+        try check(reloaded.state.webcam.layoutItems.isEmpty, "layout change deleted")
+        reloaded.undo()
+        try check(reloaded.state.webcam.layoutItems.count == 1, "layout change delete undo")
         // Shortcuts: only sessions with captured presses get the tab, saved file and export overlay.
         try check(!reopened.hasShortcuts && reopened.exportEdit.shortcuts == nil, "no captured shortcuts, no overlay")
         try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("shortcuts-config.json").path), "no shortcuts, no shortcuts-config.json")

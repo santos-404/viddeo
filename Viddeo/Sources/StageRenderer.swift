@@ -67,16 +67,24 @@ struct StageRenderer: Sendable {
         let padding = style.paddingRatio * min(width, height)
         let stageWidth = width - 2 * padding, stageHeight = height - 2 * padding
         var fitWidth = stageWidth, fitHeight = stageHeight
-        if contentAspect.isFinite, contentAspect > 0 {
-            if contentAspect > stageWidth / stageHeight {
-                fitHeight = stageWidth / contentAspect
+        let frame = DeviceFrameRenderer(configuration: style.deviceMockup)
+        let fitAspect = frame.map { Double($0.geometry.canvasSize.width / $0.geometry.canvasSize.height) } ?? contentAspect
+        if fitAspect.isFinite, fitAspect > 0 {
+            if fitAspect > stageWidth / stageHeight {
+                fitHeight = stageWidth / fitAspect
             } else {
-                fitWidth = stageHeight * contentAspect
+                fitWidth = stageHeight * fitAspect
             }
         }
         let minX = ((width - fitWidth) / 2).rounded(), maxX = ((width + fitWidth) / 2).rounded()
         let minY = ((height - fitHeight) / 2).rounded(), maxY = ((height + fitHeight) / 2).rounded()
         return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+    }
+
+    func screenRect(contentAspect: Double) -> CGRect {
+        let rect = stageRect(contentAspect: contentAspect)
+        guard let frame = DeviceFrameRenderer(configuration: style.deviceMockup) else { return rect }
+        return frame.apertureRect(in: frame.fittedRect(in: rect))
     }
 
     /// Mask, shadow and border for one content size; cached for the most recent size.
@@ -90,7 +98,18 @@ struct StageRenderer: Sendable {
     /// Returns an output-size image: background, shadow, content in the stage rect clipped
     /// to the rounded mask, then the inset border. Content is expected at origin zero.
     func compose(_ content: CIImage) -> CIImage {
-        prepared(contentSize: content.extent.size).compose(content)
+        if let frame = DeviceFrameRenderer(configuration: style.deviceMockup) {
+            let aspect = content.extent.height > 0 ? Double(content.extent.width / content.extent.height) : 0
+            let rect = stageRect(contentAspect: aspect)
+            // Device owns screen rounding and bezel; stage inset and screen corner radius are bypassed.
+            let scale = Double(outputSize.height) / StageStyle.referenceHeight
+            return frame.compose(content, in: rect, shadowIntensity: style.shadow.intensity,
+                                 shadowDistance: style.shadow.isDirectional ? style.shadow.distance * scale : 0,
+                                 shadowAngle: style.shadow.angle,
+                                 shadowBlur: style.shadow.blur * scale)
+                .composited(over: background).cropped(to: CGRect(origin: .zero, size: outputSize))
+        }
+        return prepared(contentSize: content.extent.size).compose(content)
     }
 
     private func makePrepared(contentSize: CGSize) -> PreparedStage {

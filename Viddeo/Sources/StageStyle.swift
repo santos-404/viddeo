@@ -102,6 +102,32 @@ struct StageStyle: Codable, Sendable, Equatable {
     var inset = Inset()
     var background = StageBackground.standard
     var backgroundBlur = 0.0
+    var deviceMockup = DeviceMockupConfiguration()
+
+    private enum CodingKeys: String, CodingKey { case paddingRatio, cornerRadius, shadow, inset, background, backgroundBlur, deviceMockup }
+
+    init(paddingRatio: Double = 0.1, cornerRadius: Double = 16, shadow: Shadow = Shadow(), inset: Inset = Inset(),
+         background: StageBackground = .standard, backgroundBlur: Double = 0,
+         deviceMockup: DeviceMockupConfiguration = DeviceMockupConfiguration()) {
+        self.paddingRatio = paddingRatio
+        self.cornerRadius = cornerRadius
+        self.shadow = shadow
+        self.inset = inset
+        self.background = background
+        self.backgroundBlur = backgroundBlur
+        self.deviceMockup = deviceMockup
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        paddingRatio = try c.decodeIfPresent(Double.self, forKey: .paddingRatio) ?? 0.1
+        cornerRadius = try c.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 16
+        shadow = try c.decodeIfPresent(Shadow.self, forKey: .shadow) ?? Shadow()
+        inset = try c.decodeIfPresent(Inset.self, forKey: .inset) ?? Inset()
+        background = try c.decodeIfPresent(StageBackground.self, forKey: .background) ?? .standard
+        backgroundBlur = try c.decodeIfPresent(Double.self, forKey: .backgroundBlur) ?? 0
+        deviceMockup = try c.decodeIfPresent(DeviceMockupConfiguration.self, forKey: .deviceMockup) ?? DeviceMockupConfiguration()
+    }
 
     static let referenceHeight = 1080.0
     static let wallpaperNames = ["aurora", "dusk", "mint", "graphite"]
@@ -143,6 +169,14 @@ struct StageStyle: Codable, Sendable, Equatable {
               Self.rgba(hex: inset.color) != nil
         else { throw StageError.invalidStyle("inset values are out of range") }
         guard (0...100).contains(backgroundBlur) else { throw StageError.invalidStyle("background blur must be 0–100") }
+        if deviceMockup.enabled {
+            guard let id = deviceMockup.deviceID, DeviceFrameCatalog.geometry(deviceID: id, finish: deviceMockup.finish) != nil else {
+                throw StageError.invalidStyle("unknown device frame")
+            }
+        }
+        if let finish = deviceMockup.finish, !DeviceFrameCatalog.finishes.contains(finish) {
+            throw StageError.invalidStyle("unknown device finish")
+        }
         switch background {
         case .color(let hex):
             guard Self.rgba(hex: hex) != nil else { throw StageError.invalidStyle("malformed color \(hex)") }
@@ -195,6 +229,36 @@ struct StageStyle: Codable, Sendable, Equatable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self).write(to: directory.appendingPathComponent("stage-config.json"), options: .atomic)
+    }
+}
+
+struct DeviceMockupConfiguration: Codable, Sendable, Equatable {
+    var enabled = false
+    var deviceID: String? = nil
+    var finish: String? = nil
+}
+
+struct DeviceFrameGeometry: Codable, Sendable, Equatable {
+    var canvasSize: CGSize
+    var screenRect: CGRect
+    var screenCornerRadius: CGFloat
+    var bodyCornerRadius: CGFloat
+    var bezelColour: String
+}
+
+enum DeviceFrameCatalog {
+    static let devices = ["laptop", "desktop display", "tablet", "phone"]
+    static let finishes = ["dark", "light"]
+    static func geometry(deviceID: String, finish: String?) -> DeviceFrameGeometry? {
+        let light = finish == "light"
+        let colour = light ? "#c7cbd1" : "#252932"
+        switch deviceID {
+        case "laptop": return .init(canvasSize: CGSize(width: 1200, height: 760), screenRect: CGRect(x: 58, y: 34, width: 1084, height: 650), screenCornerRadius: 18, bodyCornerRadius: 30, bezelColour: colour)
+        case "desktop display": return .init(canvasSize: CGSize(width: 1200, height: 900), screenRect: CGRect(x: 30, y: 28, width: 1140, height: 650), screenCornerRadius: 16, bodyCornerRadius: 28, bezelColour: colour)
+        case "tablet": return .init(canvasSize: CGSize(width: 820, height: 1080), screenRect: CGRect(x: 38, y: 38, width: 744, height: 1004), screenCornerRadius: 62, bodyCornerRadius: 78, bezelColour: colour)
+        case "phone": return .init(canvasSize: CGSize(width: 520, height: 1080), screenRect: CGRect(x: 34, y: 34, width: 452, height: 1012), screenCornerRadius: 58, bodyCornerRadius: 82, bezelColour: colour)
+        default: return nil
+        }
     }
 }
 

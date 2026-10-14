@@ -265,7 +265,8 @@ final class OfflineExporter {
                 ?? renderer.contentRect
             renderer.webcam = try await WebcamExportPlan.make(
                 session: session, directory: sessionDirectory, configuration: configuration,
-                outputSize: outputSize, contentRect: contentRect)
+                outputSize: outputSize, contentRect: contentRect, stage: renderer.stage,
+                cutoutQuality: previewWidth == nil ? .balanced : .fast)
         }
         // The output runs in playback time; without a timeline that is the recording itself.
         let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
@@ -591,6 +592,7 @@ struct ExportFrameRenderer: Sendable {
             image = cursor.composited(over: image)
         }
         let crop = frame.cropRect(width: width, height: height)
+        let split = splitScreenLayout(at: time, camera: camera, zoomScale: frame.scale)
         // Screen motion blur: crops interpolated from the zoom one frame earlier to now, one resample
         // each, averaged with equal weights. `beforeTime` is nil across a cut (and at the start).
         let beforeCrop = beforeTime.map { timeline.frame(at: $0).cropRect(width: width, height: height) } ?? crop
@@ -598,7 +600,7 @@ struct ExportFrameRenderer: Sendable {
         if let stage {
             // The crop is resampled once, straight into the stage rect's pixel size (its aspect
             // matches the source up to rounding), then placed by the stage.
-            let size = stage.stageRect(contentAspect: Double(sourceWidth) / Double(sourceHeight)).size
+            let size = (split?.screen ?? stage.screenRect(contentAspect: Double(sourceWidth) / Double(sourceHeight))).size
             let target = CGRect(origin: .zero, size: size)
             let crops = screenBlur.crops(now: crop, before: beforeCrop, outputScale: Double(size.width / crop.width))
             let resized = Self.averaged(crops.map { crop in
@@ -612,12 +614,13 @@ struct ExportFrameRenderer: Sendable {
                     : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
                 return resized.cropped(to: target)
             })
-            let staged = stage.compose(resized)
-            return withCaptions(withShortcuts(withWebcam(staged, camera: camera, at: time), at: time), at: time).cropped(to: outputRect)
+            let staged = split.flatMap { splitFrame($0, screen: resized, camera: camera, background: stage.background) }
+                ?? stage.compose(resized)
+            return withCaptions(withShortcuts(withWebcam(staged, camera: camera, at: time, zoomScale: frame.scale), at: time), at: time).cropped(to: outputRect)
         }
 
         // One resample maps the crop straight into the fitted content rectangle.
-        let content = contentRect
+        let content = split?.screen ?? contentRect
         let crops = screenBlur.crops(now: crop, before: beforeCrop, outputScale: Double(content.width / crop.width))
         let placed = Self.averaged(crops.map { crop in
             let total = content.width / crop.width
@@ -633,7 +636,9 @@ struct ExportFrameRenderer: Sendable {
                 .cropped(to: content)
         })
         let background = CIImage(color: .black).cropped(to: outputRect)
-        return withCaptions(withShortcuts(withWebcam(placed.composited(over: background), camera: camera, at: time), at: time), at: time)
+        let framed = split.flatMap { splitFrame($0, screen: placed, camera: camera, background: background) }
+            ?? placed.composited(over: background)
+        return withCaptions(withShortcuts(withWebcam(framed, camera: camera, at: time, zoomScale: frame.scale), at: time), at: time)
             .cropped(to: outputRect)
     }
 
@@ -666,13 +671,40 @@ struct ExportFrameRenderer: Sendable {
 
     /// The overlay is positioned in output space; hide-during-silence reads source-time milliseconds,
     /// like caption cues. The fullscreen layout replaces the screen with the camera.
-    private func withWebcam(_ frame: CIImage, camera: CIImage?, at sourceTime: Double) -> CIImage {
+    private func withWebcam(_ frame: CIImage, camera: CIImage?, at sourceTime: Double, zoomScale: Double) -> CIImage {
         guard let webcam, let camera else { return frame }
-        if webcam.overlay.configuration.layout == .fullscreenCamera { return webcam.overlay.fullscreen(camera: camera) }
+        switch webcam.overlay.layout(atMs: sourceTime * 1000) {
+        case .fullscreenCamera: return webcam.overlay.fullscreen(camera: camera)
+        case .splitScreen: return frame // drawn by `splitFrame`, which also places the screen
+        case .cutoutCamera:
+            // The person over the screen; without a mask this frame falls back to the rounded overlay (recorded).
+            let rect = webcam.resolve(atSource: sourceTime, camera: camera, zoomScale: zoomScale).camera
+            if let rect, let mask = webcam.cutout?.mask(for: camera, atMs: sourceTime * 1000) {
+                return webcam.overlay.cutout(camera: camera, mask: mask, rect: rect).composited(over: frame)
+            }
+            return webcam.overlay.roundedOverlay(camera: camera)?.composited(over: frame) ?? frame
+        default: break
+        }
         guard let overlay = webcam.overlay.image(camera: camera, atMs: sourceTime * 1000, chunks: webcam.chunks) else {
             return frame
         }
         return overlay.composited(over: frame)
+    }
+
+    /// The split-screen layout at `time` (source seconds), or nil for every other layout: the screen then keeps
+    /// its normal placement. Its `screen` rect is the pane the zoomed, motion-blurred screen is fitted into.
+    private func splitScreenLayout(at time: Double, camera: CIImage?, zoomScale: Double) -> WebcamOverlay.ResolvedLayout? {
+        guard let webcam, webcam.overlay.layout(atMs: time * 1000) == .splitScreen else { return nil }
+        return webcam.resolve(atSource: time, camera: camera, zoomScale: zoomScale)
+    }
+
+    /// Composes a split-screen frame from the screen content (positioned anywhere; moved into its pane) and the camera.
+    private func splitFrame(_ layout: WebcamOverlay.ResolvedLayout, screen: CIImage, camera: CIImage?,
+                            background: CIImage) -> CIImage? {
+        guard let webcam else { return nil }
+        let moved = screen.transformed(by: CGAffineTransform(translationX: layout.screen.minX - screen.extent.minX,
+                                                             y: layout.screen.minY - screen.extent.minY))
+        return webcam.overlay.splitFrame(layout, screen: moved, camera: camera, background: background)
     }
 
     /// Shortcut presses are source-time like caption cues; drawn in output space, so zoom never moves them.

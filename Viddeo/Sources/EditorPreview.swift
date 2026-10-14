@@ -204,9 +204,11 @@ struct EditorPreview: View {
     let editor: EditorModel
     let settings: ExportSettings
     let showsClickEffects: Bool
-    @State private var model = EditorPreviewModel()
+    /// Owned by the editor, which reads the playhead for "add at playhead" actions.
+    let model: EditorPreviewModel
 
-    /// Everything that changes the picture; audio settings are not part of it.
+    /// Everything that changes the picture; audio settings are not part of it. `webcam` carries the layout
+    /// options and the layout changes, so editing either rebuilds the preview.
     private struct Key: Equatable {
         var timeline: TimelineModel
         var stage: StageStyle

@@ -11,6 +11,8 @@ struct EditorView: View {
     @State private var trimStart = 0.0
     @State private var trimEnd = 0.0
     @State private var splitTime = 0.0
+    @State private var previewModel = EditorPreviewModel()
+    @State private var newLayout = WebcamLayout.splitScreen
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,7 +24,7 @@ struct EditorView: View {
                 Button("Redo") { editor.redo() }.disabled(!editor.canRedo)
                 Button("Save Project") { editor.save(presetID: presetID) }
             }
-            EditorPreview(editor: editor, settings: settings, showsClickEffects: showsClickEffects)
+            EditorPreview(editor: editor, settings: settings, showsClickEffects: showsClickEffects, model: previewModel)
             TabView {
                 timeline.tabItem { Text("Timeline") }
                 stage.tabItem { Text("Background") }
@@ -123,6 +125,32 @@ struct EditorView: View {
                     editor.edit({ $0.stage.cornerRadius = value }, key: "radius")
                 }), in: 0...100)
                 Text(editor.state.stage.cornerRadius.formatted(.number.precision(.fractionLength(0))))
+            }
+            HStack {
+                Text("Device frame")
+                Picker("Device frame", selection: Binding(get: {
+                    editor.state.stage.deviceMockup.enabled ? (editor.state.stage.deviceMockup.deviceID ?? "none") : "none"
+                }, set: { value in
+                    editor.edit {
+                        $0.stage.deviceMockup.enabled = value != "none"
+                        $0.stage.deviceMockup.deviceID = value == "none" ? nil : value
+                    }
+                })) {
+                    Text("None").tag("none")
+                    ForEach(DeviceFrameCatalog.devices, id: \.self) { Text($0.capitalized).tag($0) }
+                }
+            }
+            if editor.state.stage.deviceMockup.enabled {
+                HStack {
+                    Text("Finish")
+                    Picker("Finish", selection: Binding(get: { editor.state.stage.deviceMockup.finish ?? "dark" }, set: { value in
+                        editor.edit { $0.stage.deviceMockup.finish = value }
+                    })) {
+                        ForEach(DeviceFrameCatalog.finishes, id: \.self) { Text($0.capitalized).tag($0) }
+                    }
+                }
+                Text("The screen aperture controls its shape; stage corner radius and inset are not applied to it.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Text("Motion blur")
@@ -315,6 +343,8 @@ struct EditorView: View {
                 Text("Overlay").tag(WebcamLayout.cameraOverlay)
                 Text("Full-screen camera").tag(WebcamLayout.fullscreenCamera)
                 Text("Screen only").tag(WebcamLayout.screenOnly)
+                Text("Split screen").tag(WebcamLayout.splitScreen)
+                Text("Cutout camera").tag(WebcamLayout.cutoutCamera)
             }
             Picker("Position", selection: Binding(get: { editor.state.webcam.anchor }, set: { anchor in
                 editor.edit { $0.webcam.position = anchor.point }
@@ -338,10 +368,118 @@ struct EditorView: View {
                 editor.edit { $0.webcam.hideDuringSilenceMs = on ? 2_000 : nil }
             }))
             .disabled(!hasMicrophone)
+            if editor.state.webcam.usedLayouts.contains(.splitScreen) { splitOptions }
+            if editor.state.webcam.usedLayouts.contains(.cutoutCamera) { cutoutOptions }
+            layoutChanges
             Text("The camera is composited into MP4 and GIF exports at the position and size shown here.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.padding(12)
+    }
+
+    private var splitOptions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Split screen").font(.subheadline)
+            Picker("Direction", selection: Binding(get: { editor.state.webcam.split.direction }, set: { value in
+                editor.edit { $0.webcam.split.direction = value }
+            })) {
+                Text("Automatic").tag(SplitDirection.auto)
+                Text("Side by side").tag(SplitDirection.horizontal)
+                Text("Stacked").tag(SplitDirection.vertical)
+            }
+            HStack {
+                Toggle("Flip", isOn: Binding(get: { editor.state.webcam.split.flip }, set: { value in
+                    editor.edit { $0.webcam.split.flip = value }
+                }))
+                Toggle("Gap between panes", isOn: Binding(get: { editor.state.webcam.split.enablePadding }, set: { value in
+                    editor.edit { $0.webcam.split.enablePadding = value }
+                }))
+            }
+            HStack {
+                Toggle("Automatic screen share", isOn: Binding(get: { editor.state.webcam.split.screenRatio == nil }, set: { auto in
+                    editor.edit { $0.webcam.split.screenRatio = auto ? nil : SplitScreenOptions.defaultScreenRatio }
+                }))
+                if let ratio = editor.state.webcam.split.screenRatio {
+                    Slider(value: Binding(get: { ratio }, set: { value in
+                        editor.edit({ $0.webcam.split.screenRatio = value }, key: "split-ratio")
+                    }), in: 0.1...0.9)
+                    Text(ratio.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+                }
+            }
+        }
+    }
+
+    private var cutoutOptions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Cutout camera").font(.subheadline)
+            cutoutSlider("Position", value: editor.state.webcam.cutout.positionX, range: 0...1, key: "cutout-x") { $0.webcam.cutout.positionX = $1 }
+            cutoutSlider("Size", value: editor.state.webcam.cutout.sizeRatio, range: 0.1...1, key: "cutout-size") { $0.webcam.cutout.sizeRatio = $1 }
+            cutoutSlider("Zoomed", value: editor.state.webcam.cutout.zoomedScale, range: 0.2...1, key: "cutout-zoomed") { $0.webcam.cutout.zoomedScale = $1 }
+            Picker("Aspect", selection: Binding(get: { editor.state.webcam.cutout.aspectRatio ?? .original }, set: { value in
+                editor.edit { $0.webcam.cutout.aspectRatio = value == .original ? nil : value }
+            })) {
+                Text("Camera").tag(WebcamAspectRatio.original)
+                Text("Square").tag(WebcamAspectRatio.square)
+                Text("16:9").tag(WebcamAspectRatio.horizontal)
+                Text("9:16").tag(WebcamAspectRatio.vertical)
+            }
+            Text("The person is cut out on this Mac with Apple Vision; frames without a person show the rounded overlay instead.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func cutoutSlider(_ title: String, value: Double, range: ClosedRange<Double>, key: String,
+                              apply: @escaping (inout EditorState, Double) -> Void) -> some View {
+        HStack {
+            Text(title).frame(width: 60, alignment: .leading)
+            Slider(value: Binding(get: { value }, set: { newValue in
+                editor.edit({ apply(&$0, newValue) }, key: key)
+            }), in: range)
+            Text(value.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+        }
+    }
+
+    /// Layout changes in source time; the default layout applies outside them.
+    private var layoutChanges: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Layout changes").font(.subheadline)
+                Picker("New layout", selection: $newLayout) {
+                    ForEach(WebcamLayout.allCases, id: \.self) { Text(Self.layoutName($0)).tag($0) }
+                }
+                .labelsHidden()
+                Button("Add at playhead") {
+                    let source = editor.state.timeline.sourceTime(forPlaybackTime: previewModel.time) * 1000
+                    editor.edit { try $0.webcam.addLayoutItem(layout: newLayout, atMs: source,
+                                                              sourceDurationMs: editor.session.duration * 1000) }
+                }
+            }
+            ForEach(editor.state.webcam.layoutItems) { item in
+                HStack {
+                    Text("\((item.startMs / 1000).formatted(.number.precision(.fractionLength(1))))–\((item.endMs / 1000).formatted(.number.precision(.fractionLength(1)))) s")
+                        .monospacedDigit().frame(width: 110, alignment: .leading)
+                    Picker("Layout", selection: Binding(get: { item.layout }, set: { value in
+                        editor.edit { if let index = $0.webcam.layoutItems.firstIndex(where: { $0.id == item.id }) { $0.webcam.layoutItems[index].layout = value } }
+                    })) {
+                        ForEach(WebcamLayout.allCases, id: \.self) { Text(Self.layoutName($0)).tag($0) }
+                    }
+                    .labelsHidden()
+                    Button("Delete") { editor.edit { $0.webcam.removeLayoutItem(id: item.id) } }
+                }
+            }
+            Text("Changes switch immediately (the original's transition is unknown) and use source seconds, at least 0.5 s each.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private static func layoutName(_ layout: WebcamLayout) -> String {
+        switch layout {
+        case .cameraOverlay: "Overlay"
+        case .screenOnly: "Screen only"
+        case .fullscreenCamera: "Full-screen camera"
+        case .splitScreen: "Split screen"
+        case .cutoutCamera: "Cutout camera"
+        }
     }
 
     private func number(_ title: String, value: Binding<Double>) -> some View {

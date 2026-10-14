@@ -25,6 +25,7 @@ struct VerifyStage {
         try verifyValidation()
         try verifyPersistence(in: temp)
         try verifyStageRect()
+        try verifyDeviceFrames()
         try verifyComposition()
         try verifyGradients()
         try verifyWallpapers()
@@ -149,6 +150,34 @@ struct VerifyStage {
         }
         try check((try? StageRenderer(style: StageStyle(), outputSize: CGSize(width: 0, height: 720))) == nil,
                   "zero output size was accepted")
+    }
+
+    static func verifyDeviceFrames() throws {
+        for id in DeviceFrameCatalog.devices {
+            guard let geometry = DeviceFrameCatalog.geometry(deviceID: id, finish: "dark"),
+                  let frame = DeviceFrameRenderer(configuration: DeviceMockupConfiguration(enabled: true, deviceID: id)) else {
+                throw Failure("missing device geometry for \(id)")
+            }
+            let fitted = frame.fittedRect(in: CGRect(x: 72, y: 72, width: 1136, height: 576))
+            let expectedScale = min(1136 / geometry.canvasSize.width, 576 / geometry.canvasSize.height)
+            try check(abs(fitted.width / fitted.height - geometry.canvasSize.width / geometry.canvasSize.height) < 0.0001,
+                      "\(id) device aspect changed")
+            try check(fitted.width <= 1136.01 && fitted.height <= 576.01 && abs(fitted.width - geometry.canvasSize.width * expectedScale) < 0.1,
+                      "\(id) does not fit stage rect")
+            let aperture = frame.apertureRect(in: fitted)
+            try check(fitted.contains(aperture) && aperture.width > 0 && aperture.height > 0,
+                      "\(id) aperture lies outside body")
+            try check(abs(aperture.width / aperture.height - geometry.screenRect.width / geometry.screenRect.height) < 0.0001,
+                      "\(id) aperture aspect changed")
+        }
+        let legacy = String(decoding: try JSONEncoder().encode(StageStyle()), as: UTF8.self)
+            .replacingOccurrences(of: ",\"deviceMockup\":{\"deviceID\":null,\"enabled\":false,\"finish\":null}", with: "")
+        let decoded = try JSONDecoder().decode(StageStyle.self, from: Data(legacy.utf8))
+        try check(!decoded.deviceMockup.enabled && decoded == StageStyle(), "legacy stage config did not decode with mockup disabled")
+        let plain = try StageRenderer(style: StageStyle(), outputSize: output)
+        let explicitlyOff = try StageRenderer(style: StageStyle(deviceMockup: DeviceMockupConfiguration(enabled: false, deviceID: "laptop")), outputSize: output)
+        try check(try Bitmap(plain.compose(content(width: 640, height: 360))).bytes == Bitmap(explicitlyOff.compose(content(width: 640, height: 360))).bytes,
+                  "disabled mockup changed stage pixels")
     }
 
     // MARK: - Composition

@@ -199,7 +199,7 @@ struct VerifyExport {
 
         try await verifyScreenMotionBlur(session: session, directory: directory)
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); split-screen (direction, flip, ratio, stage gap), timed layout items, cutout (fallback, cached, injected mask); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
     }
 
     /// Screen / zoom motion blur through the real renderer. The click at 3.0 s starts a fast zoom-in
@@ -1308,6 +1308,161 @@ struct VerifyExport {
                 throw VerificationError.failed("GIF camera pixel at \(label) is \(pixel), expected \(color)")
             }
         }
+        try await verifyWebcamLayouts(session: session, directory: directory)
+    }
+
+    /// Split-screen, layout items and cutout on the 640×360 screen fixture (quadrants blue/green over red/yellow)
+    /// with the magenta → cyan camera (cyan from screen time 2 s). Output is 1280×720; points are top-left pixels.
+    @MainActor
+    private static func verifyWebcamLayouts(session: RecordingSession, directory: URL) async throws {
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+        let blue = RGB(red: 32, green: 48, blue: 230), green = RGB(red: 32, green: 220, blue: 48)
+        let red = RGB(red: 230, green: 48, blue: 32), yellow = RGB(red: 220, green: 210, blue: 32)
+        let magenta = RGB(red: 255, green: 0, blue: 255), cyan = RGB(red: 0, green: 255, blue: 255)
+        let black = RGB(red: 0, green: 0, blue: 0), orange = RGB(red: 255, green: 128, blue: 0)
+
+        func export(_ name: String, _ configuration: WebcamConfiguration, stage: StageStyle? = nil) async throws -> AVURLAsset {
+            let url = directory.appendingPathComponent(name)
+            try await OfflineExporter().export(session: session, directory: directory, destination: url, showsClickEffects: false,
+                                               settings: settings, edit: ExportEdit(stage: stage, webcam: configuration))
+            return AVURLAsset(url: url)
+        }
+        func expect(_ asset: AVURLAsset, _ label: String, _ points: [(time: Double, x: Double, y: Double, color: RGB)]) async throws {
+            for (time, x, y, color) in points {
+                let pixel = try await sampleColor(asset: asset, time: time, x: x / 1280, y: y / 720)
+                guard pixel.matches(color, tolerance: 110) else {
+                    throw VerificationError.failed("\(label): pixel (\(Int(x)), \(Int(y))) at \(time)s is \(pixel), expected \(color)")
+                }
+            }
+        }
+
+        // Side by side (auto, landscape): screen fitted into the left pane (x 0..640, y 180..540), camera fills the right.
+        var split = WebcamConfiguration()
+        split.layout = .splitScreen
+        let sideBySide = try await export("webcam-split.mp4", split)
+        try await expect(sideBySide, "split screen", [
+            (4.0, 150, 270, blue), (4.0, 470, 270, green), (4.0, 150, 450, red), (4.0, 470, 450, yellow),
+            (4.0, 960, 360, cyan), (4.0, 800, 40, cyan), (4.0, 1200, 690, cyan), (1.5, 960, 360, magenta),
+            (4.0, 320, 90, black), (4.0, 320, 640, black)
+        ])
+
+        // Stacked, flipped and a ratio.
+        var stacked = split
+        stacked.split.direction = .vertical
+        try await expect(try await export("webcam-split-stacked.mp4", stacked), "stacked split", [
+            (4.0, 390, 90, blue), (4.0, 790, 270, yellow), (4.0, 640, 540, cyan), (4.0, 100, 700, cyan), (4.0, 100, 90, black)
+        ])
+        var flipped = split
+        flipped.split.flip = true
+        try await expect(try await export("webcam-split-flip.mp4", flipped), "flipped split", [
+            (4.0, 160, 360, cyan), (4.0, 790, 270, blue), (4.0, 1100, 310, green), (4.0, 790, 450, red)
+        ])
+        var narrow = split
+        narrow.split.screenRatio = 0.25
+        try await expect(try await export("webcam-split-ratio.mp4", narrow), "split ratio 0.25", [
+            (4.0, 75, 290, blue), (4.0, 400, 100, cyan), (4.0, 800, 360, cyan), (4.0, 160, 100, black)
+        ])
+
+        // With a stage the panes sit in the padded area (72 px); the gap is the stage background only with enablePadding.
+        var stage = StageStyle()
+        stage.shadow.intensity = 0
+        stage.background = .color("#ff8000")
+        try await expect(try await export("webcam-split-stage.mp4", split, stage: stage), "split on a stage", [
+            (4.0, 36, 360, orange), (4.0, 660, 360, cyan), (4.0, 300, 300, blue), (4.0, 1100, 360, cyan), (4.0, 1250, 360, orange)
+        ])
+        var padded = split
+        padded.split.enablePadding = true
+        try await expect(try await export("webcam-split-stage-padded.mp4", padded, stage: stage), "padded split on a stage", [
+            (4.0, 640, 360, orange), (4.0, 36, 360, orange), (4.0, 1000, 360, cyan), (4.0, 300, 330, blue)
+        ])
+
+        // A layout item switches the overlay to split screen and back (source time).
+        var timed = WebcamConfiguration()
+        timed.layoutItems = [CameraLayoutItem(startMs: 3000, endMs: 6000, layout: .splitScreen)]
+        let timedAsset = try await export("webcam-layout-items.mp4", timed)
+        try await expect(timedAsset, "layout item", [
+            (2.6, 1034, 474, cyan), (2.6, 950, 200, green), (2.6, 310, 90, blue),
+            (4.0, 950, 200, cyan), (4.0, 310, 90, black), (4.0, 150, 270, blue),
+            (6.5, 950, 200, green), (6.5, 1034, 474, cyan), (6.5, 310, 90, blue)
+        ])
+        // The default layout can be screen-only with the camera shown only inside an item.
+        var itemOnly = WebcamConfiguration()
+        itemOnly.layout = .screenOnly
+        itemOnly.layoutItems = [CameraLayoutItem(startMs: 3000, endMs: 6000, layout: .splitScreen)]
+        try await expect(try await export("webcam-layout-item-only.mp4", itemOnly), "screen-only default with a split item", [
+            (2.6, 1100, 500, yellow), (4.0, 960, 360, cyan), (6.5, 1100, 500, yellow)
+        ])
+
+        // Cutout with a synthetic camera frame (flat cyan: Vision finds no person) falls back to the rounded overlay and the
+        // export succeeds. Vision may hallucinate a person in other flat colours (it does in flat magenta at .balanced),
+        // so the pixel checks only run when it returns no mask for the cyan frame on this machine.
+        var cutout = WebcamConfiguration()
+        cutout.layout = .cutoutCamera
+        let cutoutAsset = try await export("webcam-cutout-fallback.mp4", cutout)
+        let flatCyan = CIImage(color: CIColor(red: 0, green: 1, blue: 1)).cropped(to: CGRect(x: 0, y: 0, width: 320, height: 240))
+        let visionEmpty = PersonSegmenter.mask(for: flatCyan, quality: .balanced) == nil
+        if visionEmpty {
+            try await expect(cutoutAsset, "cutout fallback", [(4.0, 1034, 474, cyan), (4.0, 150, 270, blue)])
+        } else {
+            print("note: Vision found a person in a flat cyan frame; cutout fallback pixel checks skipped")
+        }
+
+        // The renderer directly: fallback is recorded and cached, an injected mask gives the masked composite.
+        let prepared = try await OfflineExporter.makeRenderer(
+            session: session, directory: directory, settings: settings, edit: ExportEdit(webcam: cutout), showsClickEffects: false)
+        var renderer = prepared.renderer
+        guard let cache = renderer.webcam?.cutout else {
+            throw VerificationError.failed("a cutout layout builds no mask cache")
+        }
+        let sourceFrames = try await ExportFrameSource(asset: AVURLAsset(url: prepared.sourceURL), duration: prepared.sourceDuration, timeline: nil)
+        guard let source = try sourceFrames.image(atSource: 4.0) else { throw VerificationError.failed("no fixture frame") }
+        defer { sourceFrames.cancel() }
+        let camera = CIImage(color: CIColor(red: 0, green: 1, blue: 1)).cropped(to: CGRect(x: 0, y: 0, width: 320, height: 240))
+        let context = CIContext()
+        func pixel(_ image: CIImage, _ x: Int, _ y: Int) throws -> RGB {
+            guard let cg = context.createCGImage(image, from: renderer.outputRect, format: .RGBA8,
+                                                 colorSpace: CGColorSpace(name: CGColorSpace.sRGB)),
+                  let sampled = NSBitmapImageRep(cgImage: cg).colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+                throw VerificationError.failed("could not read a rendered pixel")
+            }
+            return RGB(red: UInt8(sampled.redComponent * 255), green: UInt8(sampled.greenComponent * 255), blue: UInt8(sampled.blueComponent * 255))
+        }
+        let fallback = renderer.image(source: source, at: 4.0, camera: camera)
+        let again = renderer.image(source: source, at: 4.0, camera: camera)
+        if visionEmpty {
+            guard try pixel(fallback, 1200, 600).matches(cyan), try pixel(again, 1200, 600).matches(cyan),
+                  try pixel(fallback, 150, 270).matches(blue) else {
+                throw VerificationError.failed("the cutout fallback frame is not the screen plus the rounded camera overlay")
+            }
+            guard cache.fallbackFrameCount == 2, cache.fallbackTimes == [4000, 4000], cache.segmentationRuns == 1 else {
+                throw VerificationError.failed("fallback not recorded or not cached: \(cache.fallbackFrameCount) frames, \(cache.segmentationRuns) runs")
+            }
+        } else {
+            guard cache.segmentationRuns == 1 else { throw VerificationError.failed("the mask was not cached: \(cache.segmentationRuns) runs") }
+        }
+        // A segmenter that fails (nil) always falls back, is recorded, and never throws.
+        let failing = CutoutMaskCache(segmenter: { _ in nil })
+        renderer.webcam?.cutout = failing
+        let failed = renderer.image(source: source, at: 4.0, camera: camera)
+        guard try pixel(failed, 1200, 600).matches(cyan), try pixel(failed, 150, 270).matches(blue),
+              failing.fallbackFrameCount == 1, failing.fallbackTimes == [4000] else {
+            throw VerificationError.failed("a failing segmenter did not fall back to the rounded overlay")
+        }
+
+        // Injected segmenter: the left half of the camera is the person; the cutout sits at the bottom right (920, 450 top-left).
+        let mask = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: CGRect(x: 0, y: 0, width: 80, height: 120))
+            .composited(over: CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: CGRect(x: 0, y: 0, width: 160, height: 120)))
+        let injected = CutoutMaskCache(segmenter: { _ in mask })
+        renderer.webcam?.cutout = injected
+        let masked = renderer.image(source: source, at: 4.0, camera: camera)
+        guard try pixel(masked, 1000, 600).matches(cyan), try pixel(masked, 1200, 610).matches(yellow, tolerance: 60),
+              try pixel(masked, 1000, 300).matches(green, tolerance: 60), try pixel(masked, 1034, 474).matches(cyan) else {
+            throw VerificationError.failed("the masked cutout is not the person over the screen")
+        }
+        guard injected.fallbackFrameCount == 0, injected.segmentationRuns == 1 else {
+            throw VerificationError.failed("the injected mask was not used")
+        }
+        // Not driven here (live only): Vision finding a real person in a real camera frame and the mask quality.
     }
 
     // MARK: Edits (timeline, audio, stage, captions)
@@ -1474,6 +1629,33 @@ struct VerifyExport {
             guard pixel.matches(orange) else {
                 throw VerificationError.failed("stage padding just outside the content at (\(x), \(y)) is \(pixel)")
             }
+        }
+
+        var deviceStage = stage
+        deviceStage.deviceMockup = DeviceMockupConfiguration(enabled: true, deviceID: "laptop", finish: "dark")
+        let deviceURL = directory.appendingPathComponent("stage-device.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: deviceURL,
+                                           settings: ExportSettings(fps: 30, height: 720, aspectRatio: .preset(.tall)),
+                                           edit: ExportEdit(stage: deviceStage))
+        let deviceAsset = AVURLAsset(url: deviceURL)
+        let deviceRect = (minX: 40.0, width: 324.0, minY: 257.4, height: 205.2)
+        let screen = (x: deviceRect.minX + deviceRect.width * 58 / 1200,
+                      y: deviceRect.minY + deviceRect.height * 34 / 760,
+                      width: deviceRect.width * 1084 / 1200,
+                      height: deviceRect.height * 650 / 760)
+        let screenPixel = try await sampleColor(asset: deviceAsset, time: 1.0,
+            x: (screen.x + screen.width * 0.2) / 404, y: (screen.y + screen.height * 0.4) / 720)
+        guard screenPixel.matches(colorQuadrant(x: 0.2, y: 0.4)) else {
+            throw VerificationError.failed("device aperture contains \(screenPixel), expected screen fixture color")
+        }
+        let bezel = try await sampleColor(asset: deviceAsset, time: 1.0,
+            x: (deviceRect.minX + deviceRect.width * 0.025) / 404, y: (deviceRect.minY + deviceRect.height * 0.45) / 720)
+        guard bezel.matches(RGB(red: 37, green: 41, blue: 50), tolerance: 35) else {
+            throw VerificationError.failed("device bezel pixel is \(bezel)")
+        }
+        let deviceBackground = try await sampleColor(asset: deviceAsset, time: 1.0, x: 0.03, y: 0.03)
+        guard deviceBackground.matches(orange) else {
+            throw VerificationError.failed("stage background outside device is \(deviceBackground)")
         }
 
         // GIF honors the same edit: 6 s at 15 fps, frame at playback 4 s shows source 1 s.
