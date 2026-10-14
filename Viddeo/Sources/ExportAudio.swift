@@ -90,7 +90,7 @@ final class ExportAudioTrack {
         var cursor = CMTime.zero
         var hasMedia = false
         var gains: [(start: Int64, end: Int64, gain: Float)] = []
-        for item in plan {
+        for item in plan.flatMap(Self.audioIntervals) {
             let source = CMTimeRange(start: time(item.sourceStart), end: time(item.sourceEnd))
             let available = source.intersection(trackRange)
             if available.duration > .zero {
@@ -150,6 +150,30 @@ final class ExportAudioTrack {
             reader = nil
             output = nil
             readerFinished = true
+        }
+    }
+
+    /// AVMutableComposition supports a constant stretch per range. Subdivide a continuous curve
+    /// into 50 ms source intervals and use each interval's exact mean scale (exact integrated
+    /// duration for linear scale curves; pitch preservation remains AVFoundation's spectral path).
+    private static func audioIntervals(_ item: EditPlanItem) -> [EditPlanItem] {
+        guard let keys = item.speedKeyframes, !keys.isEmpty else { return [item] }
+        let duration = item.sourceEnd - item.sourceStart
+        var cuts: [Double] = [0, duration]
+        cuts += keys.map(\.sourceOffset).filter { $0 > 0 && $0 < duration }
+        cuts = Array(Set(cuts)).sorted()
+        var dense: [Double] = [cuts[0]]
+        for (a, b) in zip(cuts, cuts.dropFirst()) {
+            let count = max(1, Int(ceil((b - a) / 0.05)))
+            dense += (1...count).map { a + (b - a) * Double($0) / Double(count) }
+        }
+        return zip(dense, dense.dropFirst()).map { a, b in
+            var interval = item
+            interval.sourceStart = item.sourceStart + a
+            interval.sourceEnd = item.sourceStart + b
+            interval.timeScale = (item.scale(at: a) + item.scale(at: b)) / 2
+            interval.speedKeyframes = nil
+            return interval
         }
     }
 

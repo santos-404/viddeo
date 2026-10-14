@@ -208,6 +208,29 @@ struct VerifyTimeline {
         try speed.setTimeScale(segmentID: speedID, to: 0.5)
         try expect(speed.segments[1].speed == 2 && speed.playbackDuration == 8, "timeScale 0.5 doubles speed")
         try expect(speed.playbackDuration == speed.segments.reduce(0) { $0 + $1.sourceDuration * $1.timeScale }, "playback = Σ source × scale")
+        var ramp = TimelineModel(sourceDuration: 10)
+        let rampID = ramp.segments[0].id
+        try ramp.setSpeedKeyframes(segmentID: rampID, to: [
+            SpeedKeyframe(sourceOffset: 0, timeScale: 1),
+            SpeedKeyframe(sourceOffset: 10, timeScale: 2)
+        ])
+        try expect(near(ramp.playbackDuration, 15), "linear speed-ramp playback duration integrates scale")
+        try expect(near(ramp.playbackTime(forSourceTime: 5)!, 6.25), "linear speed-ramp source-to-playback mapping integrates scale")
+        for sample in 0..<100 {
+            let playback = ramp.playbackDuration * Double(sample) / 99
+            try expect(near(ramp.playbackTime(forSourceTime: ramp.sourceTime(forPlaybackTime: playback))!, playback, 1e-7),
+                       "speed-ramp mappings round trip")
+        }
+        var rampSplit = ramp
+        try rampSplit.split(atSource: 5)
+        try expect(near(rampSplit.playbackDuration, 15) && near(rampSplit.playbackTime(forSourceTime: 2.5)!, 2.8125),
+                   "split preserves the ramp curve")
+        let rampJSON = try JSONEncoder().encode(ramp)
+        try expect(try JSONDecoder().decode(TimelineModel.self, from: rampJSON) == ramp, "ramp timeline JSON roundtrip")
+        let oldJSON = #"{"sourceDuration":1,"segments":[{"id":"00000000-0000-0000-0000-000000000001","sourceStart":0,"sourceEnd":1,"timeScale":1,"volume":1,"systemVolume":1,"hideCursor":false}]}"#.data(using: .utf8)!
+        let oldTimeline = try JSONDecoder().decode(TimelineModel.self, from: oldJSON)
+        try expect(oldTimeline.playbackDuration == 1 && oldTimeline.segments[0].speedKeyframes == nil,
+                   "version-1 timeline without ramp keys remains compatible")
         before = speed
         try expectError(TimelineError.invalidTimeScale, "timeScale below range") { try speed.setTimeScale(segmentID: speedID, to: 0.01) }
         try expectError(TimelineError.invalidTimeScale, "timeScale above range") { try speed.setTimeScale(segmentID: speedID, to: 11) }

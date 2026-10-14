@@ -51,7 +51,7 @@ struct EditorView: View {
                 .font(.caption).foregroundStyle(.secondary)
             Picker("Segment", selection: $editor.selectedSegmentID) {
                 ForEach(Array(editor.state.timeline.segments.enumerated()), id: \.element.id) { index, segment in
-                    Text("\(index + 1): \(segment.sourceStart.formatted(.number.precision(.fractionLength(2))))–\(segment.sourceEnd.formatted(.number.precision(.fractionLength(2)))) s · \(segment.speed.formatted())×")
+                    Text("\(index + 1): \(segment.sourceStart.formatted(.number.precision(.fractionLength(2))))–\(segment.sourceEnd.formatted(.number.precision(.fractionLength(2)))) s · \(segment.speed.formatted())×\(segment.speedKeyframes?.isEmpty == false ? " ramp" : "")")
                         .tag(Optional(segment.id))
                 }
             }
@@ -82,6 +82,14 @@ struct EditorView: View {
                         }
                         if ![0.05, 0.1, 0.25, 0.5, 1, 2, 4, 10].contains(segment.timeScale) {
                             Text("\(segment.speed.formatted())×").tag(segment.timeScale)
+                        }
+                    }
+                    Button("Ramp from 1×") {
+                        editor.edit {
+                            try $0.timeline.setSpeedKeyframes(segmentID: segment.id, to: [
+                                SpeedKeyframe(sourceOffset: 0, timeScale: 1),
+                                SpeedKeyframe(sourceOffset: segment.sourceDuration, timeScale: segment.timeScale)
+                            ])
                         }
                     }
                     Toggle("Hide rendered cursor", isOn: Binding(get: { segment.hideCursor }, set: { hidden in
