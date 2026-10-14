@@ -45,9 +45,23 @@ things before encoding, all per source: master volume and mutes multiply each tr
 (an audio mix in the pass-through path, the PCM gain step in the edited path); the microphone
 track is run through the `VoiceCleanup` preset and re-read from a temporary CAF, delayed by the
 track's start offset so it stays aligned; click sounds are rendered from the pointer events and
-exported as an extra AAC track. Sources are never mixed into one track. Neutral configurations are
-dropped, so the default export is byte-for-byte the previous path. Background music, the limiter
-and loudness target, and `AudioMixer.render` (single mixed track) are not wired.
+exported as an extra AAC track. Background music (a file copied into the session folder, named by
+`backgroundAudioFileName`) is a viddeo design choice in playback time: it starts at playback 0, loops
+(5 ms seam fades) to fill the edited duration, fades out linearly over the last second, ignores trims
+and speed ramps, and takes master volume x music volume (default 0.05) unless muted; it is baked to a
+CAF and exported as another AAC track. A missing file fails the export with an error naming it.
+With `mixdownSingleTrack` (MP4 only) the per-source `ExportAudioTrack`s are created without a writer
+and drained with `renderPCM()` (48 kHz, playback time, gains applied), summed with the music by
+`AudioMixer.sum`, optionally loudness-normalized (`targetLoudnessLUFS`) and brick-wall limited
+(`limiterCeilingDB`), then encoded as ONE stereo AAC track. The limiter runs before AAC encoding, so
+the decoded peak can exceed the ceiling by a fraction of a dB. Neutral configurations (music unset or
+muted, no mixdown) are dropped, so the default export is byte-for-byte the previous path.
+
+`OfflineExporter.makeRenderer` builds the `ExportFrameRenderer` (validation, zoom, clicks, cursor, stage,
+captions, camera plan) for both the export and the editor preview. `PreviewFrameRenderer` (an actor in
+`EditorPreview.swift`) renders its frames at 640 px wide off the main actor through seekable
+`ExportFrameSource`/`WebcamFrameSource`; `EditorPreviewModel` plays at up to 30 fps by wall clock (slow frames
+are skipped) and cancels stale scrub requests. The preview shows the editor's unsaved state and has no audio.
 
 `EditorModel` owns a complete timeline/stage/caption snapshot and `EditHistory`.
 Failed edits roll back; exports consume current unsaved state. Sidecars save atomically
@@ -75,5 +89,4 @@ epoch. Microphone cleanup, master volume/mutes, click sounds and the camera over
 The camera is recorded by `WebcamRecorder` as a separate `camera.mov`, started after the screen stream
 and aligned afterwards through host-clock first-frame times; `WebcamExportPlan`/`WebcamFrameSource`
 decode and place it per output frame (seek-capable for edited timelines), so recording never depends on
-the camera. Processed playback preview, background music, one mixed (limited, loudness-normalized) audio
-export track, split-screen/cutout layouts and face tracking remain follow-ups.
+the camera. Processed playback preview, split-screen/cutout layouts and face tracking remain follow-ups.

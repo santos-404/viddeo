@@ -59,7 +59,7 @@ the generated cue text before saving. Enable Background and padding to add a gra
 padding and rounded corners. Export uses the current edits, including unsaved changes.
 The Audio tab sets master volume, mutes, microphone cleanup (Voice, Noise reduction, Podcast;
 viddeo's own DSP, off by default) and an optional synthesized click sound exported as an extra
-audio track. There is no processed playback preview yet; review exported files.
+audio track. The editor shows a processed preview (export renderer at reduced size, current unsaved edits) with scrubber and play/pause, without audio.
 
 Save Project writes `project.json`, `stage-config.json`, `captions.json` and
 `captions-config.json` beside the session. Edits are also saved before starting another
@@ -111,7 +111,7 @@ speed/silence actions and rendered cursor are implemented. Speech model availabi
 transcription quality and the new capture controls need live acceptance.
 The camera overlay (Camera overlay toggle before recording, Camera tab in the editor) and audio
 mix are wired into recording and MP4/GIF export; camera permission, device behavior and sync are
-live-only checks. Device mockups, shortcut overlays, continuous speed ramps, processed preview and ripple distortion remain
+live-only checks. Device mockups, shortcut overlays, continuous speed ramps and ripple distortion remain
 follow-ups. All of these areas remain in scope.
 
 M4 (export presets, GIF, side-by-side comparison tool) is implemented and verified
