@@ -38,7 +38,16 @@ after all requested codecs succeed. Failures remove temporary output.
 `ExportAudioTrack` keeps raw sources separate. Edited tracks use AVMutableComposition
 for trim/reorder and spectral time stretching, then apply per-segment PCM gains.
 Silence gaps are filled to the edited playback duration. `ExportEdit` carries immutable
-timeline, stage and source-time caption settings from the editor to the exporter.
+timeline, stage, source-time caption and audio-mix settings from the editor to the exporter.
+
+An `AudioMixConfiguration` that changes anything (`audio-config.json`, Audio tab) adds three
+things before encoding, all per source: master volume and mutes multiply each track's gain
+(an audio mix in the pass-through path, the PCM gain step in the edited path); the microphone
+track is run through the `VoiceCleanup` preset and re-read from a temporary CAF, delayed by the
+track's start offset so it stays aligned; click sounds are rendered from the pointer events and
+exported as an extra AAC track. Sources are never mixed into one track. Neutral configurations are
+dropped, so the default export is byte-for-byte the previous path. Background music, the limiter
+and loudness target, and `AudioMixer.render` (single mixed track) are not wired.
 
 `EditorModel` owns a complete timeline/stage/caption snapshot and `EditHistory`.
 Failed edits roll back; exports consume current unsaved state. Sidecars save atomically
@@ -62,6 +71,7 @@ math and media independently of screen permissions.
 
 The basic editor and source/playback mapping now work. `AppleSpeechCaptionProvider`
 uses SpeechAnalyzer/SpeechTranscriber; caption audio extraction preserves the movie's
-epoch. Webcam recorder/overlay and DSP audio cleanup/mixing/click modules are implemented
-and tested independently, but still need app/export integration. Processed playback
-preview, camera lifecycle integration and one mixed audio export track remain follow-ups.
+epoch. Microphone cleanup, master volume/mutes and click sounds are in the export. The
+webcam recorder/overlay is implemented and tested independently but still needs app/export
+integration. Processed playback preview, camera lifecycle integration, background music and one
+mixed (limited, loudness-normalized) audio export track remain follow-ups.

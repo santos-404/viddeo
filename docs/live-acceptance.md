@@ -51,5 +51,14 @@ Things only a person with the real hardware/permissions can verify. Synthetic ve
 - [ ] Open a legacy session and confirm its embedded cursor is not drawn a second time.
 - [ ] Check quit/session switching saves edits; a failed save must keep the current editor.
 
-Camera and DSP audio integration remain pending; the existing camera/audio checklist
+## Audio mix — 2026-10-14
+
+- [ ] Record speech with some background noise; export with Microphone cleanup Voice, Noise
+  reduction and Podcast and listen: speech intelligible, no pumping or musical-noise artifacts, no
+  clipping. (DSP is viddeo's own chain; synthetic tones only prove level, pitch and timing.)
+- [ ] Pick a click sound, record several clicks, export and compare click audio timing against the
+  visible click; the click track must be a separate third track in QuickTime/ffprobe.
+- [ ] Mute system/microphone and change master volume; confirm exported tracks follow.
+
+Camera integration remains pending; the existing camera/audio checklist
 above is for their standalone modules and subsequent live integration acceptance.

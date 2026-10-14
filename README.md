@@ -49,7 +49,7 @@ typing is opt-in and records key-down timestamps only, never keys or text.
 Tune the procedural arrow in `cursor-config.json`; shake removal, motion blur,
 app-specific cursor shapes and shortcut overlays remain follow-ups.
 
-After Stop or Load Session, use the editor's Timeline, Background and Captions tabs.
+After Stop or Load Session, use the editor's Timeline, Background, Captions and Audio tabs.
 Trim/split/delete/reorder segments, choose speed and separate microphone/system gains,
 or analyze microphone silence and apply Trim Silence / Speed Silence 4×.
 Source ranges use recording seconds; the playback duration updates with edits.
@@ -57,7 +57,9 @@ Undo/Redo covers timeline, stage and captions. Generate on Device requires recor
 microphone audio; Apple may download a supported language model. Review and correct
 the generated cue text before saving. Enable Background and padding to add a gradient,
 padding and rounded corners. Export uses the current edits, including unsaved changes.
-There is no processed playback preview yet; review exported files.
+The Audio tab sets master volume, mutes, microphone cleanup (Voice, Noise reduction, Podcast;
+viddeo's own DSP, off by default) and an optional synthesized click sound exported as an extra
+audio track. There is no processed playback preview yet; review exported files.
 
 Save Project writes `project.json`, `stage-config.json`, `captions.json` and
 `captions-config.json` beside the session. Edits are also saved before starting another
