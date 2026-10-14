@@ -57,6 +57,12 @@ and drained with `renderPCM()` (48 kHz, playback time, gains applied), summed wi
 the decoded peak can exceed the ceiling by a fraction of a dB. Neutral configurations (music unset or
 muted, no mixdown) are dropped, so the default export is byte-for-byte the previous path.
 
+Cursor motion: `CursorTimeline` filters its input events (`CursorEventFilter`: Manhattan-pixel shake removal,
+optional loop window with a return-to-start event), springs them, and exposes `trail(at:fps:)` (now plus the state one
+output frame earlier, blended by `motionBlurAmount x fps/60`). `CursorRenderer` draws the trail as 16 (export) or 6
+(preview) equal-alpha stamps of one arrow bitmap; `makeRenderer` sets `cursorFPS` and the sample quality on the
+`ExportFrameRenderer`. Screen/zoom motion blur is not implemented. See `research/cursor-motion.md`.
+
 `OfflineExporter.makeRenderer` builds the `ExportFrameRenderer` (validation, zoom, clicks, cursor, stage,
 captions, camera plan) for both the export and the editor preview. `PreviewFrameRenderer` (an actor in
 `EditorPreview.swift`) renders its frames at 640 px wide off the main actor through seekable
@@ -69,9 +75,29 @@ one at a time, with the project saved last. Switching sessions or quitting first
 dirty state; a failure prevents that transition. Asynchronous speech/silence operations
 disable capture, export and editing until they finish.
 
+Keyboard shortcut overlay: `CursorRecorder` has a second opt-in beside key timing. Its listen-only tap
+passes key-downs to `ShortcutCapture.classify` (pure, in `RecordingSession.swift`), which keeps a press
+only when ⌘/⌥/⌃ is held or the key is a special non-text key, and looks the key's unmodified
+character up (UCKeyTranslate, layout-aware) only for those; the result is `RecordingSession.shortcuts`.
+`ShortcutOverlay.swift` holds the pure model (`ShortcutOverlayConfiguration`, grouping and timing in
+`ShortcutOverlayPlanner`, glyph table) and `ShortcutOverlayRenderer`, which draws the key caps with
+Core Graphics/Core Text into a canvas-size CIImage like `CaptionRenderer`. `ExportFrameRenderer`
+composites it after the camera and before captions, in output space, so zoom never moves it; export,
+GIF and the editor preview share that path. The settings are part of `EditorState` and persist as
+`shortcuts-config.json`; `ExportEdit.load` reads it.
+
 `ClickEffectTimeline` filters and sorts pointer-down events, bounds active events
 by binary search, and supplies deterministic source-space rings during export.
 It does not depend on recording state; overlays follow the same crop as raw video.
+
+Colour: every exported pixel is sRGB-encoded. The exporter used to render through `CIContext` into the
+`itur_709` colour space and tag the stream BT.709 transfer; macOS decodes that tag as a gamma ~1.96 curve,
+so a #204060 stage came back as (50,83,116) instead of (32,64,96). The exporter now renders in sRGB,
+tags the stream BT.709 primaries/matrix with the sRGB (IEC 61966-2-1) transfer and the same attachments
+on each pixel buffer, and `SourceFrameReader` decodes raw recordings as sRGB (ScreenCaptureKit output is
+sRGB content written with a BT.709 tag), so screen pixels pass through unchanged. `Scripts/verify-color.swift`
+asserts the round trip (greys <= 3/255, saturated <= 8/255). GIF was already sRGB; the editor preview
+keeps a BT.709-tagged CGImage, which the display colour-manages correctly.
 
 ## Module layout
 

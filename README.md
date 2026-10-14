@@ -47,7 +47,14 @@ system cursor instead. Existing sessions keep their embedded cursor. If pointer
 monitoring cannot start, capture falls back to the system cursor. Hide cursor while
 typing is opt-in and records key-down timestamps only, never keys or text.
 Tune the procedural arrow in `cursor-config.json`; shake removal, motion blur,
-app-specific cursor shapes and shortcut overlays remain follow-ups.
+app-specific cursor shapes remain follow-ups.
+
+Record keyboard shortcuts is a separate opt-in (off by default). It stores only shortcut
+presses: the modifier set and key, and only when ⌘, ⌥ or ⌃ is held or the key is Esc, Return,
+Tab, Delete, an arrow, an F-key, Home/End/Page Up/Page Down. Plain and shift-only typing is never
+stored. When shortcuts were recorded, the editor's Shortcuts tab enables the on-screen key caps
+(drawn bottom-centre of the stage, in MP4, GIF and the preview), sets their size and hides single
+shortcuts; settings are saved in `shortcuts-config.json`.
 
 After Stop or Load Session, use the editor's Timeline, Background, Captions and Audio tabs.
 Trim/split/delete/reorder segments, choose speed and separate microphone/system gains,

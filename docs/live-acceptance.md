@@ -74,3 +74,15 @@ Things only a person with the real hardware/permissions can verify. Synthetic ve
 - [ ] Camera + stage + captions + trim/reorder together in one export, MP4 and GIF.
 
 Hide-while-silent is the one camera path without a synthetic end-to-end pixel check.
+
+## Shortcuts, cursor motion, colour — 2026-10-14
+
+- [ ] Enable Record keyboard shortcuts, press ⌘C, ⌘⇧4, Esc, arrows and type a sentence; export with Show
+  shortcuts on. Only the combos/special keys appear; no typed text is stored in `session.json`. Note: on
+  layouts where ⌥+letter types characters (e.g. German `@` = ⌥L) those presses are stored as ⌥+key.
+- [ ] Compare the overlay against Screen Studio's on the same keys (position, cap look, 1.5 s hold, fades).
+- [ ] Cursor motion blur on a fast flick at 30 and 60 fps exports looks the same length; amount 0 removes it.
+  A shaky hand movement (large jitter) is smoothed out; no clicks are lost.
+- [ ] Colour: exports are now tagged sRGB transfer (BT.709 primaries/matrix). Compare one export with the
+  preview and the raw recording in QuickTime, Safari, Chrome, and after uploading to YouTube/Slack;
+  report any player that shows it lighter/darker.
