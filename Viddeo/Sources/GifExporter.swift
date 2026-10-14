@@ -71,13 +71,15 @@ enum GifExporter {
             try Task.checkCancellation()
             // Yield between frames so cancellation and UI progress stay responsive.
             await Task.yield()
-            let time = renderer.sourceTime(forPlaybackTime: Double(index) / Double(settings.fps))
+            let playback = Double(index) / Double(settings.fps)
+            let time = renderer.sourceTime(forPlaybackTime: playback)
             guard let sourceImage = try frames.image(atSource: time) else {
                 throw OfflineExporter.ExportError.encodingFailed("the raw recording has no decodable frames")
             }
             try autoreleasepool {
                 let camera = try cameraFrames?.image(atSource: time)
-                guard let frame = context.createCGImage(renderer.image(source: sourceImage, at: time, camera: camera),
+                guard let frame = context.createCGImage(renderer.image(source: sourceImage, at: time, camera: camera,
+                                                                    beforeTime: renderer.previousSourceTime(forPlaybackTime: playback)),
                                                         from: renderer.outputRect, format: .RGBA8,
                                                         colorSpace: colorSpace) else {
                     throw OfflineExporter.ExportError.encodingFailed("could not render GIF frame \(index)")

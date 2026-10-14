@@ -224,7 +224,12 @@ final class OfflineExporter {
             }
         }
         let outputSize = CGSize(width: size.width, height: size.height)
-        let cursorConfiguration = session.cursorEmbedded == false ? try CursorConfiguration.load(in: directory) : nil
+        // `cursor-config.json` holds the one `motionBlurAmount` (cursor and screen). A legacy session with the
+        // cursor embedded in the video has no rendered cursor but still gets screen blur from it (default 1).
+        var storedCursor = try CursorConfiguration.load(in: directory)
+        if let amount = edit?.motionBlurAmount { storedCursor.motionBlurAmount = amount }
+        try storedCursor.validate()
+        let cursorConfiguration = session.cursorEmbedded == false ? storedCursor : nil
         var renderer = ExportFrameRenderer(
             sourceWidth: session.width, sourceHeight: session.height,
             outputWidth: size.width, outputHeight: size.height,
@@ -243,7 +248,11 @@ final class OfflineExporter {
             }
         )
         renderer.cursorFPS = Double(settings.fps)
-        if let previewWidth, previewWidth > 0 { renderer.cursorBlurQuality = .preview }
+        renderer.screenBlur = ScreenMotionBlur(amount: storedCursor.motionBlurAmount, fps: Double(settings.fps))
+        if let previewWidth, previewWidth > 0 {
+            renderer.cursorBlurQuality = .preview
+            renderer.screenBlur = .preview(amount: storedCursor.motionBlurAmount, fps: Double(settings.fps))
+        }
         if let shortcuts = edit?.shortcuts {
             let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
                 ?? renderer.contentRect
@@ -458,7 +467,8 @@ final class OfflineExporter {
                     }
                     let camera = try cameraFrames?.image(atSource: sourceTime)
                     Self.tagAsSRGB(buffer)
-                    context.render(renderer.image(source: sourceImage, at: sourceTime, camera: camera), to: buffer,
+                    context.render(renderer.image(source: sourceImage, at: sourceTime, camera: camera,
+                                                  beforeTime: renderer.previousSourceTime(forPlaybackTime: time.seconds)), to: buffer,
                                    bounds: renderer.outputRect, colorSpace: colorSpace)
                     guard adaptor.append(buffer, withPresentationTime: time) else {
                         throw ExportError.encodingFailed(writer.error?.localizedDescription ?? "a video frame was rejected")
@@ -530,6 +540,8 @@ struct ExportFrameRenderer: Sendable {
     /// editor preview gets the cheaper preview quality in `makeRenderer`).
     var cursorFPS = 60.0
     var cursorBlurQuality = CursorBlurQuality.export
+    /// Screen / zoom motion blur (shared `motionBlurAmount`, output fps, sample caps); the camera overlay is not blurred.
+    var screenBlur = ScreenMotionBlur()
     var webcam: WebcamExportPlan? = nil
 
     /// Identity without a timeline, so the unedited export samples exactly as before.
@@ -557,7 +569,9 @@ struct ExportFrameRenderer: Sendable {
 
     /// `camera` is the camera frame for `time` (see `WebcamFrameSource`); it is composited over the
     /// staged frame, under the captions, when a webcam plan is present.
-    func image(source rawSource: CIImage, at time: Double, camera: CIImage? = nil) -> CIImage {
+    /// `beforeTime` is the SOURCE time one output frame earlier (`previousSourceTime(forPlaybackTime:)`);
+    /// nil renders the screen without motion blur.
+    func image(source rawSource: CIImage, at time: Double, camera: CIImage? = nil, beforeTime: Double? = nil) -> CIImage {
         let frame = timeline.frame(at: time)
         let width = CGFloat(sourceWidth), height = CGFloat(sourceHeight)
 
@@ -576,53 +590,78 @@ struct ExportFrameRenderer: Sendable {
                                              quality: cursorBlurQuality) {
             image = cursor.composited(over: image)
         }
-        let scale = frame.scale.isFinite ? max(1, frame.scale) : 1
-        let cropWidth = width / CGFloat(scale)
-        let cropHeight = height / CGFloat(scale)
-        let centerX = CGFloat(frame.centerX.isFinite ? frame.centerX : 0.5) * width
-        // ZoomTimeline uses a top-left normalized origin; Core Image uses bottom-left.
-        let centerY = CGFloat(1 - (frame.centerY.isFinite ? frame.centerY : 0.5)) * height
-        let clampedX = min(max(centerX, cropWidth / 2), width - cropWidth / 2)
-        let clampedY = min(max(centerY, cropHeight / 2), height - cropHeight / 2)
-        let crop = CGRect(
-            x: clampedX - cropWidth / 2,
-            y: clampedY - cropHeight / 2,
-            width: cropWidth,
-            height: cropHeight
-        )
+        let crop = frame.cropRect(width: width, height: height)
+        // Screen motion blur: crops interpolated from the zoom one frame earlier to now, one resample
+        // each, averaged with equal weights. `beforeTime` is nil across a cut (and at the start).
+        let beforeCrop = beforeTime.map { timeline.frame(at: $0).cropRect(width: width, height: height) } ?? crop
 
         if let stage {
             // The crop is resampled once, straight into the stage rect's pixel size (its aspect
             // matches the source up to rounding), then placed by the stage.
             let size = stage.stageRect(contentAspect: Double(sourceWidth) / Double(sourceHeight)).size
-            let scaleX = size.width / crop.width, scaleY = size.height / crop.height
-            let cropped = image.cropped(to: crop).clampedToExtent()
-                .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
-            let resized = scaleY < 1
-                ? cropped.applyingFilter("CILanczosScaleTransform", parameters: [
-                    kCIInputScaleKey: scaleY, kCIInputAspectRatioKey: scaleX / scaleY
-                ])
-                : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-            let staged = stage.compose(resized.cropped(to: CGRect(origin: .zero, size: size)))
+            let target = CGRect(origin: .zero, size: size)
+            let crops = screenBlur.crops(now: crop, before: beforeCrop, outputScale: Double(size.width / crop.width))
+            let resized = Self.averaged(crops.map { crop in
+                let scaleX = size.width / crop.width, scaleY = size.height / crop.height
+                let cropped = image.cropped(to: crop).clampedToExtent()
+                    .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+                let resized = scaleY < 1
+                    ? cropped.applyingFilter("CILanczosScaleTransform", parameters: [
+                        kCIInputScaleKey: scaleY, kCIInputAspectRatioKey: scaleX / scaleY
+                    ])
+                    : cropped.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                return resized.cropped(to: target)
+            })
+            let staged = stage.compose(resized)
             return withCaptions(withShortcuts(withWebcam(staged, camera: camera, at: time), at: time), at: time).cropped(to: outputRect)
         }
 
         // One resample maps the crop straight into the fitted content rectangle.
         let content = contentRect
-        let total = content.width / crop.width
-        let cropped = image.cropped(to: crop).clampedToExtent()
-            .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
-        let resized = total < 1
-            ? cropped.applyingFilter("CILanczosScaleTransform", parameters: [
-                kCIInputScaleKey: total, kCIInputAspectRatioKey: 1
-            ])
-            : cropped.transformed(by: CGAffineTransform(scaleX: total, y: total))
-        let placed = resized
-            .transformed(by: CGAffineTransform(translationX: content.minX, y: content.minY))
-            .cropped(to: content)
+        let crops = screenBlur.crops(now: crop, before: beforeCrop, outputScale: Double(content.width / crop.width))
+        let placed = Self.averaged(crops.map { crop in
+            let total = content.width / crop.width
+            let cropped = image.cropped(to: crop).clampedToExtent()
+                .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+            let resized = total < 1
+                ? cropped.applyingFilter("CILanczosScaleTransform", parameters: [
+                    kCIInputScaleKey: total, kCIInputAspectRatioKey: 1
+                ])
+                : cropped.transformed(by: CGAffineTransform(scaleX: total, y: total))
+            return resized
+                .transformed(by: CGAffineTransform(translationX: content.minX, y: content.minY))
+                .cropped(to: content)
+        })
         let background = CIImage(color: .black).cropped(to: outputRect)
         return withCaptions(withShortcuts(withWebcam(placed.composited(over: background), camera: camera, at: time), at: time), at: time)
             .cropped(to: outputRect)
+    }
+
+    /// Equal-weight average of opaque, identically-bounded samples (alpha 1/n each, summed). A single
+    /// sample is returned untouched, so the unblurred frame is exactly the plain resample.
+    private static func averaged(_ samples: [CIImage]) -> CIImage {
+        guard samples.count > 1 else { return samples[0] }
+        let weight = CGFloat(1) / CGFloat(samples.count)
+        var sum: CIImage?
+        for sample in samples {
+            let weighted = sample.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: weight)])
+            sum = sum.map { weighted.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: $0]) } ?? weighted
+        }
+        return sum ?? samples[0]
+    }
+
+    /// Source time of the frame one output frame earlier, for the screen motion blur: the playback
+    /// time `1/fps` before `playback`, mapped through the edit like any frame. Nil when it precedes
+    /// the start or falls in a different segment (never blur across a cut).
+    func previousSourceTime(forPlaybackTime playback: Double) -> Double? {
+        let fps = screenBlur.fps
+        guard screenBlur.strength > 0, fps.isFinite, fps > 0, playback.isFinite else { return nil }
+        let previous = playback - 1 / fps
+        guard previous >= 0 else { return nil }
+        guard let edit else { return min(previous, sourceDuration) }
+        guard let index = edit.segmentIndex(atPlayback: playback),
+              edit.segmentIndex(atPlayback: previous) == index else { return nil }
+        return min(edit.sourceTime(forPlaybackTime: previous), sourceDuration)
     }
 
     /// The overlay is positioned in output space; hide-during-silence reads source-time milliseconds,

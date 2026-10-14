@@ -11,6 +11,8 @@ struct EditorState: Sendable, Equatable {
     var audio: AudioMixConfiguration
     var webcam: WebcamConfiguration
     var shortcuts: ShortcutOverlayConfiguration
+    /// Shared cursor and screen-zoom motion blur, 0...1 (`cursor-config.json`).
+    var motionBlurAmount: Double
 }
 
 @MainActor
@@ -43,7 +45,8 @@ final class EditorModel {
             audio: manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path)
                 ? try AudioMixConfiguration.load(in: directory) : .editorDefault,
             webcam: try WebcamConfiguration.load(in: directory),
-            shortcuts: try ShortcutOverlayConfiguration.load(in: directory))
+            shortcuts: try ShortcutOverlayConfiguration.load(in: directory),
+            motionBlurAmount: try CursorConfiguration.load(in: directory).motionBlurAmount)
         self.session = session
         self.directory = directory
         self.project = project
@@ -65,7 +68,8 @@ final class EditorModel {
                    captions: state.captionConfiguration.enabled && !state.captions.cues.isEmpty
                     ? (state.captions, state.captionConfiguration) : nil,
                    audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam,
-                   shortcuts: session.shortcuts.map { ($0, state.shortcuts) })
+                   shortcuts: session.shortcuts.map { ($0, state.shortcuts) },
+                   motionBlurAmount: state.motionBlurAmount)
     }
 
     /// Failed edits leave both state and history intact.
@@ -81,6 +85,7 @@ final class EditorModel {
             try candidate.audio.validate()
             try candidate.webcam.validate()
             try candidate.shortcuts.validate()
+            guard (0...1).contains(candidate.motionBlurAmount) else { throw CursorError.invalidConfiguration }
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
             reconcileSelection()
@@ -117,6 +122,12 @@ final class EditorModel {
             try state.audio.save(in: directory)
             if session.webcam != nil { try state.webcam.save(in: directory) }
             if hasShortcuts { try state.shortcuts.save(in: directory) }
+            // The cursor sidecar keeps every other cursor setting; it is only created for a non-default amount.
+            var cursor = try CursorConfiguration.load(in: directory)
+            if cursor.motionBlurAmount != state.motionBlurAmount {
+                cursor.motionBlurAmount = state.motionBlurAmount
+                try cursor.save(in: directory)
+            }
             try updated.save(to: directory)
             project = updated
             savedState = state

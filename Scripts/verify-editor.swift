@@ -146,6 +146,27 @@ struct VerifyEditor {
         reopened.edit { try $0.timeline.trim(segmentID: $0.timeline.segments[0].id, newStart: 1, newEnd: 3) }
         try check(reopened.save(presetID: "custom-preset"), "trim saved")
         try check(try Data(contentsOf: directory.appendingPathComponent("session.json")) == bytes, "editing never alters capture sidecar")
+        // Motion blur: one shared amount (default 1) in the editor state, undoable, validated, saved in cursor-config.json.
+        let blurDirectory = directory.appendingPathComponent("blur-session")
+        try FileManager.default.createDirectory(at: blurDirectory, withIntermediateDirectories: true)
+        try session.save(in: blurDirectory)
+        let blurEditor = try EditorModel(session: session, directory: blurDirectory)
+        try check(blurEditor.state.motionBlurAmount == 1 && blurEditor.exportEdit.motionBlurAmount == 1, "motion blur defaults to 1")
+        let beforeBlur = blurEditor.state
+        blurEditor.edit { $0.motionBlurAmount = 0.4 }
+        try check(blurEditor.exportEdit.motionBlurAmount == 0.4 && blurEditor.isDirty, "unsaved motion blur reaches the export")
+        blurEditor.edit { $0.motionBlurAmount = 2 }
+        try check(blurEditor.state.motionBlurAmount == 0.4 && blurEditor.error != nil, "invalid motion blur rolls back")
+        blurEditor.undo()
+        try check(blurEditor.state == beforeBlur, "motion blur undo")
+        blurEditor.redo()
+        var cursorConfig = CursorConfiguration()
+        cursorConfig.size = 72
+        try cursorConfig.save(in: blurDirectory)
+        try check(blurEditor.save(presetID: "custom-preset"), "motion blur saved")
+        let savedCursor = try CursorConfiguration.load(in: blurDirectory)
+        try check(savedCursor.motionBlurAmount == 0.4 && savedCursor.size == 72, "motion blur saved without touching other cursor settings")
+        try check(try EditorModel(session: session, directory: blurDirectory).state.motionBlurAmount == 0.4, "reopened editor keeps motion blur")
         // Refuse damaged/newer project files instead of silently resetting edits.
         try Data("{\"version\":99}".utf8).write(to: directory.appendingPathComponent("project.json"))
         do {

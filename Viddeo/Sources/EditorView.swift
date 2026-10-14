@@ -124,6 +124,15 @@ struct EditorView: View {
                 }), in: 0...100)
                 Text(editor.state.stage.cornerRadius.formatted(.number.precision(.fractionLength(0))))
             }
+            HStack {
+                Text("Motion blur")
+                Slider(value: Binding(get: { editor.state.motionBlurAmount }, set: { value in
+                    editor.edit({ $0.motionBlurAmount = value }, key: "motionBlur")
+                }), in: 0...1)
+                Text(editor.state.motionBlurAmount.formatted(.percent.precision(.fractionLength(0))))
+            }
+            Text("Motion blur smears the cursor and zoom camera moves; the camera overlay is not blurred.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Backgrounds, captions and edits appear in exported MP4 and GIF files.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()

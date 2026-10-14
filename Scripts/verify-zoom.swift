@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 @main
@@ -12,7 +13,77 @@ struct VerifyZoom {
         try testSmoothBoundedTransitionsAndReturn()
         try testInvalidPersistedConfiguration()
         try testExtremeValidSpringStability()
-        print("Zoom verification passed: 9 checks")
+        try testScreenMotionBlurShutter()
+        print("Zoom verification passed: 10 checks")
+    }
+
+    /// Shutter math of the screen motion blur: same blur extent at any fps, nothing when still,
+    /// sample caps, radial (scale) and directional (pan) motion.
+    private static func testScreenMotionBlurShutter() throws {
+        let width: CGFloat = 1920, height: CGFloat = 1080
+        let timeline = ZoomTimeline(session: makeSession(duration: 8, events: [event(3, 0.75, 0.25, .down)]))
+        func crops(at time: Double, fps: Double, amount: Double = 1) -> [CGRect] {
+            let now = timeline.frame(at: time).cropRect(width: width, height: height)
+            let before = timeline.frame(at: time - 1 / fps).cropRect(width: width, height: height)
+            // Uncapped, so the extent is exact.
+            return ScreenMotionBlur(amount: amount, fps: fps, maxSamples: 1000, spanPixels: 0.5)
+                .crops(now: now, before: before, outputScale: 1)
+        }
+        /// Trail length of the crop's left edge, recovered from the midpoint samples.
+        func extent(_ crops: [CGRect]) -> Double {
+            guard crops.count > 1 else { return 0 }
+            return Double(crops[crops.count - 1].minX - crops[0].minX) * Double(crops.count) / Double(crops.count - 1)
+        }
+        // Constant-velocity pan: edge travel per frame is v / fps, strength is fps / 60, so the extent is v / 60.
+        let now = CGRect(x: 100, y: 100, width: 960, height: 540)
+        let at30 = ScreenMotionBlur(amount: 1, fps: 30, maxSamples: 1000, spanPixels: 0.5)
+            .crops(now: now, before: now.offsetBy(dx: -60, dy: 0), outputScale: 1)   // v = 1800 px/s
+        let at60 = ScreenMotionBlur(amount: 1, fps: 60, maxSamples: 1000, spanPixels: 0.5)
+            .crops(now: now, before: now.offsetBy(dx: -30, dy: 0), outputScale: 1)
+        try expectClose(extent(at30), 30, "30 fps pan blur extent")
+        try expectClose(extent(at60), 30, "60 fps pan blur extent")
+        try expect(at30.last!.minX < now.minX && at30[0].minX < at30.last!.minX, "the trail is backward only")
+        let half = ScreenMotionBlur(amount: 0.5, fps: 60, maxSamples: 1000, spanPixels: 0.5)
+            .crops(now: now, before: now.offsetBy(dx: -30, dy: 0), outputScale: 1)
+        try expectClose(extent(half), 15, "amount scales the extent")
+        // The real zoom spring at its fastest: extent matches between 30 and 60 fps (the spring is smooth).
+        var best = 0.0
+        for time in stride(from: 3.0, to: 3.6, by: 0.01) { best = max(best, widthExtent(crops(at: time, fps: 60))) }
+        try expect(best > 3, "a zoom-in must produce a measurable radial blur (\(best) px)")
+        for time in [3.1, 3.2, 3.3] {
+            let a = widthExtent(crops(at: time, fps: 60)), b = widthExtent(crops(at: time, fps: 30))
+            try expect(abs(a - b) <= 0.15 * max(a, b) + 1, "zoom blur extent at \(time) s: 60 fps \(a), 30 fps \(b)")
+        }
+        // Stationary, amount 0 and sub-pixel motion are the single plain crop.
+        let still = crops(at: 0.5, fps: 60)
+        try expect(still.count == 1 && still[0] == timeline.frame(at: 0.5).cropRect(width: width, height: height), "stationary frame has one plain crop")
+        try expect(crops(at: 3.2, fps: 60, amount: 0).count == 1, "amount 0 is unblurred")
+        try expect(ScreenMotionBlur(amount: 1, fps: 60).crops(now: now, before: now.offsetBy(dx: -0.4, dy: 0), outputScale: 1).count == 1,
+                   "sub-pixel travel is unblurred")
+        // Sample caps and scaling with output pixels.
+        let fastBefore = now.offsetBy(dx: -1000, dy: 0)
+        try expect(ScreenMotionBlur(amount: 1, fps: 60).crops(now: now, before: fastBefore, outputScale: 1).count == 16, "export cap is 16")
+        try expect(ScreenMotionBlur.preview().crops(now: now, before: fastBefore, outputScale: 1).count == 6, "preview cap is 6")
+        let moderate = ScreenMotionBlur(amount: 1, fps: 60)
+        let small = moderate.crops(now: now, before: now.offsetBy(dx: -12, dy: 0), outputScale: 1).count
+        try expect(small == 3, "12 px of travel at 4 px spans is 3 samples (got \(small))")
+        try expect(moderate.crops(now: now, before: now.offsetBy(dx: -12, dy: 0), outputScale: 2).count == 6, "samples scale with output pixels")
+        // Equal-weight midpoints stay inside the trail and the last one is just before `now`.
+        let slices = moderate.crops(now: now, before: now.offsetBy(dx: -16, dy: 0), outputScale: 1)
+        try expect(slices.count == 4 && abs(slices.last!.minX - (now.minX - 2)) < 1e-9, "midpoint sampling of equal slices")
+        // Scale changes are radial: the crop size interpolates as well.
+        let zoomed = ScreenMotionBlur(amount: 1, fps: 60).crops(now: CGRect(x: 480, y: 270, width: 960, height: 540),
+                                                                  before: CGRect(x: 400, y: 225, width: 1120, height: 630), outputScale: 1)
+        try expect(zoomed.count > 1 && zoomed[0].width > zoomed.last!.width, "zoom blur interpolates the crop size")
+        var disabled = ScreenMotionBlur(amount: 1, fps: 60)
+        disabled.amount = .nan
+        try expect(disabled.strength == 0 && disabled.crops(now: now, before: fastBefore, outputScale: 1).count == 1, "invalid amount is no blur")
+    }
+
+    /// Edge travel of the crop's width change over the whole trail (zoom is radial).
+    private static func widthExtent(_ crops: [CGRect]) -> Double {
+        guard crops.count > 1 else { return 0 }
+        return Double(abs(crops[crops.count - 1].width - crops[0].width)) * Double(crops.count) / Double(crops.count - 1)
     }
 
     private static func testExtremeValidSpringStability() throws {

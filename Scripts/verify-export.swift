@@ -197,8 +197,121 @@ struct VerifyExport {
         try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
         try await verifyShortcuts(root: directory, width: width, height: height, duration: duration)
 
+        try await verifyScreenMotionBlur(session: session, directory: directory)
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding; keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
+    }
+
+    /// Screen / zoom motion blur through the real renderer. The click at 3.0 s starts a fast zoom-in
+    /// (from 2.7 s). Against the amount-0 render of the same frame: the zoom frames are smeared, a
+    /// stationary frame is byte-identical, and a frame at a segment boundary is identical because
+    /// the shutter never reaches across a cut. Also prints export time with and without blur.
+    private static func verifyScreenMotionBlur(session: RecordingSession, directory: URL) async throws {
+        let settings = ExportSettings(fps: 60, height: 720)
+        let context = CIContext()
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        struct Rig { var prepared: OfflineExporter.PreparedRender; var frames: ExportFrameSource }
+        func rig(amount: Double, edit base: ExportEdit = ExportEdit()) async throws -> Rig {
+            var edit = base
+            edit.motionBlurAmount = amount
+            let prepared = try await OfflineExporter.makeRenderer(
+                session: session, directory: directory, settings: settings, edit: edit, showsClickEffects: false)
+            let frames = try await ExportFrameSource(asset: AVURLAsset(url: prepared.sourceURL), duration: prepared.sourceDuration,
+                                                     timeline: prepared.renderer.edit, seekable: true)
+            return Rig(prepared: prepared, frames: frames)
+        }
+        func pixels(_ rig: Rig, playback: Double) throws -> [UInt8] {
+            let renderer = rig.prepared.renderer
+            let time = renderer.sourceTime(forPlaybackTime: playback)
+            guard let source = try rig.frames.image(atSource: time) else { throw VerificationError.failed("no source frame") }
+            let image = renderer.image(source: source, at: time, beforeTime: renderer.previousSourceTime(forPlaybackTime: playback))
+            let rowBytes = renderer.outputWidth * 4
+            var bytes = [UInt8](repeating: 0, count: rowBytes * renderer.outputHeight)
+            context.render(image, toBitmap: &bytes, rowBytes: rowBytes, bounds: renderer.outputRect, format: .RGBA8, colorSpace: colorSpace)
+            return bytes
+        }
+        func changed(_ a: [UInt8], _ b: [UInt8]) -> Int {
+            var count = 0
+            for pixel in 0..<(a.count / 4) {
+                let i = pixel * 4
+                if abs(Int(a[i]) - Int(b[i])) + abs(Int(a[i + 1]) - Int(b[i + 1])) + abs(Int(a[i + 2]) - Int(b[i + 2])) > 24 { count += 1 }
+            }
+            return count
+        }
+        func mean(_ a: [UInt8]) -> Double {
+            Double(stride(from: 0, to: a.count, by: 4).reduce(0) { $0 + Int(a[$1]) + Int(a[$1 + 1]) + Int(a[$1 + 2]) }) / Double(a.count / 4 * 3)
+        }
+        func compare(edit: ExportEdit, label: String, stationary: [Double], cutPlayback: Double?) async throws {
+            let sharp = try await rig(amount: 0, edit: edit), blurred = try await rig(amount: 1, edit: edit)
+            for time in stationary where try pixels(sharp, playback: time) != pixels(blurred, playback: time) {
+                throw VerificationError.failed("\(label): stationary frame at \(time) s differs with motion blur on")
+            }
+            var peak = 0, peakTime = 0.0
+            for index in 0...40 {
+                let time = 2.9 + Double(index) / 60
+                let difference = changed(try pixels(sharp, playback: time), try pixels(blurred, playback: time))
+                if difference > peak { peak = difference; peakTime = time }
+            }
+            guard peak > 2000 else { throw VerificationError.failed("\(label): zoom-in motion blur changed only \(peak) pixels") }
+            let a = try pixels(sharp, playback: peakTime), b = try pixels(blurred, playback: peakTime)
+            guard abs(mean(a) - mean(b)) < 20 else { throw VerificationError.failed("\(label): blurred frame brightness drifted (\(mean(a)) vs \(mean(b)) at \(peakTime), \(peak) px changed)") }
+            if let cutPlayback {
+                guard blurred.prepared.renderer.previousSourceTime(forPlaybackTime: cutPlayback) == nil,
+                      try pixels(sharp, playback: cutPlayback) == pixels(blurred, playback: cutPlayback) else {
+                    throw VerificationError.failed("\(label): the frame at the cut was blurred across it")
+                }
+            }
+        }
+        try await compare(edit: ExportEdit(), label: "plain", stationary: [0.5, 7.5], cutPlayback: nil)
+        var stage = StageStyle()
+        stage.shadow.intensity = 0
+        stage.background = .color("#ff8000")
+        try await compare(edit: ExportEdit(stage: stage), label: "stage", stationary: [0.5, 7.5], cutPlayback: nil)
+
+        // A cut in the middle of the zoom: playback 3.0 s is the first frame of the second segment.
+        var cut = TimelineModel(sourceDuration: session.duration)
+        try cut.split(atSource: 3)
+        try await compare(edit: ExportEdit(timeline: cut), label: "cut", stationary: [0.5, 7.5], cutPlayback: 3)
+        let control = try await rig(amount: 1), controlSharp = try await rig(amount: 0)
+        let controlDifference = changed(try pixels(control, playback: 3.05), try pixels(controlSharp, playback: 3.05))
+        guard control.prepared.renderer.previousSourceTime(forPlaybackTime: 3.05) != nil, controlDifference > 2000 else {
+            throw VerificationError.failed("the uncut control frame was not blurred (\(controlDifference) px)")
+        }
+        // Speed ramp: the before-time is the previous OUTPUT frame mapped through the edit, so a 2x
+        // segment looks 2/60 s back in source time.
+        var fast = cut
+        try fast.setTimeScale(segmentID: fast.segments[1].id, to: 0.5)
+        let fastRig = try await rig(amount: 1, edit: ExportEdit(timeline: fast))
+        let renderer = fastRig.prepared.renderer
+        guard let before = renderer.previousSourceTime(forPlaybackTime: 3.1),
+              abs(renderer.sourceTime(forPlaybackTime: 3.1) - before - 2.0 / 60) < 1e-9 else {
+            throw VerificationError.failed("speed ramp before-time is not one output frame earlier in source time")
+        }
+
+        // Export cost of the blur at 60 fps, 1280x720: the whole 8 s fixture (the zoom moves for about
+        // a second of it) and the 0.8 s around the zoom-in alone (every frame moving).
+        var zoomOnly = TimelineModel(sourceDuration: session.duration)
+        try zoomOnly.trim(segmentID: zoomOnly.segments[0].id, newStart: 2.8, newEnd: 3.6)
+        func exportSeconds(_ amount: Double, _ timeline: TimelineModel?, _ name: String) async throws -> Double {
+            let destination = directory.appendingPathComponent("blur-time-\(name)-\(amount).mp4")
+            defer { try? FileManager.default.removeItem(at: destination) }
+            let start = ContinuousClock.now
+            try await OfflineExporter().export(session: session, directory: directory, destination: destination,
+                                              showsClickEffects: false, settings: settings,
+                                              edit: ExportEdit(timeline: timeline, motionBlurAmount: amount))
+            let parts = (ContinuousClock.now - start).components
+            return Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
+        }
+        var timings: [String] = []
+        for (name, timeline) in [("8 s", nil), ("0.8 s zoom-in", zoomOnly)] as [(String, TimelineModel?)] {
+            var off = Double.infinity, on = Double.infinity
+            for _ in 0..<2 {
+                off = min(off, try await exportSeconds(0, timeline, name))
+                on = min(on, try await exportSeconds(1, timeline, name))
+            }
+            timings.append("\(name): off \(String(format: "%.2f", off)) s, on \(String(format: "%.2f", on)) s")
+        }
+        print("Screen motion blur export time (60 fps, 1280x720, best of 2): " + timings.joined(separator: "; "))
     }
 
     @MainActor

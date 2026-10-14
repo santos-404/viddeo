@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 struct ZoomConfiguration: Codable, Sendable {
@@ -48,6 +49,71 @@ struct ZoomFrame: Sendable, Equatable {
     var scale: Double
     var centerX: Double
     var centerY: Double
+}
+
+extension ZoomFrame {
+    /// Visible source rectangle (bottom-left origin, like Core Image) for a `width` x `height`
+    /// source: `1/scale` of it, centred on the normalized top-left-origin centre and kept inside.
+    func cropRect(width: CGFloat, height: CGFloat) -> CGRect {
+        let scale = self.scale.isFinite ? max(1, self.scale) : 1
+        let cropWidth = width / CGFloat(scale)
+        let cropHeight = height / CGFloat(scale)
+        let centerX = CGFloat(self.centerX.isFinite ? self.centerX : 0.5) * width
+        // ZoomTimeline uses a top-left normalized origin; Core Image uses bottom-left.
+        let centerY = CGFloat(1 - (self.centerY.isFinite ? self.centerY : 0.5)) * height
+        let clampedX = min(max(centerX, cropWidth / 2), width - cropWidth / 2)
+        let clampedY = min(max(centerY, cropHeight / 2), height - cropHeight / 2)
+        return CGRect(x: clampedX - cropWidth / 2, y: clampedY - cropHeight / 2,
+                      width: cropWidth, height: cropHeight)
+    }
+}
+
+/// Screen / zoom motion blur: the shutter math, independent of any renderer. The same
+/// `motionBlurAmount` as the cursor (see `CursorConfiguration`): `strength = amount x fps / 60`, the
+/// trail runs from `lerp(now, before, strength)` to `now` (backward only) where `before` is the zoom
+/// crop one frame earlier, so the shutter is `amount / 60` s at any fps. The renderer averages one
+/// resample per returned crop with equal weights; a single crop means the plain, unblurred path.
+struct ScreenMotionBlur: Sendable, Equatable {
+    /// Reference sample caps (16 export, 6 interactive); spans are viddeo design choices, like the cursor's.
+    static let exportSamples = 16, previewSamples = 6
+    static let exportSpanPixels = 4.0, previewSpanPixels = 16.0
+    /// Below this much edge travel (output pixels) the frame is left alone.
+    static let minimumMotionPixels = 0.5
+
+    var amount = 1.0
+    var fps = 60.0
+    var maxSamples = exportSamples
+    var spanPixels = exportSpanPixels
+
+    static func preview(amount: Double = 1, fps: Double = 60) -> Self {
+        Self(amount: amount, fps: fps, maxSamples: previewSamples, spanPixels: previewSpanPixels)
+    }
+
+    var strength: Double {
+        guard amount.isFinite, amount > 0, fps.isFinite, fps > 0 else { return 0 }
+        return amount * fps / 60
+    }
+
+    /// Crops to resample and average, oldest first (midpoints of equal trail slices). `[now]` when
+    /// there is no blur or the travel of any crop edge, scaled by `outputScale` (output pixels per
+    /// source pixel), is below half a pixel. The sample count is `ceil(travel / spanPixels)`,
+    /// clamped to `2...maxSamples`.
+    func crops(now: CGRect, before: CGRect, outputScale: Double) -> [CGRect] {
+        let strength = self.strength
+        guard strength > 0, maxSamples > 1, outputScale.isFinite, outputScale > 0 else { return [now] }
+        func mix(_ a: CGFloat, _ b: CGFloat, _ t: Double) -> CGFloat { a + (b - a) * CGFloat(t) }
+        let start = CGRect(x: mix(now.minX, before.minX, strength), y: mix(now.minY, before.minY, strength),
+                           width: mix(now.width, before.width, strength), height: mix(now.height, before.height, strength))
+        let travel = max(abs(start.minX - now.minX), abs(start.maxX - now.maxX),
+                         abs(start.minY - now.minY), abs(start.maxY - now.maxY)) * outputScale
+        guard travel.isFinite, travel >= Self.minimumMotionPixels, start.width > 0, start.height > 0 else { return [now] }
+        let count = min(maxSamples, max(2, Int(ceil(travel / max(0.5, spanPixels)))))
+        return (0..<count).map { k in
+            let t = (Double(k) + 0.5) / Double(count)   // 0 = trail start, 1 = now
+            return CGRect(x: mix(start.minX, now.minX, t), y: mix(start.minY, now.minY, t),
+                          width: mix(start.width, now.width, t), height: mix(start.height, now.height, t))
+        }
+    }
 }
 
 struct ZoomRange: Sendable, Equatable {

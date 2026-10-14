@@ -53,7 +53,8 @@ actor PreviewFrameRenderer {
             throw OfflineExporter.ExportError.encodingFailed("the raw recording has no decodable frames")
         }
         let cameraFrame = try camera?.image(atSource: sourceTime)
-        let image = renderer.image(source: source, at: sourceTime, camera: cameraFrame)
+        let image = renderer.image(source: source, at: sourceTime, camera: cameraFrame,
+                                       beforeTime: renderer.previousSourceTime(forPlaybackTime: playback))
         guard let result = context.createCGImage(image, from: renderer.outputRect, format: .BGRA8, colorSpace: colorSpace) else {
             throw OfflineExporter.ExportError.encodingFailed("could not render a preview frame")
         }
@@ -214,6 +215,7 @@ struct EditorPreview: View {
         var captionConfiguration: CaptionConfiguration
         var webcam: WebcamConfiguration
         var shortcuts: ShortcutOverlayConfiguration
+        var motionBlurAmount: Double
         var settings: ExportSettings
         var showsClickEffects: Bool
     }
@@ -221,7 +223,8 @@ struct EditorPreview: View {
     private var key: Key {
         Key(timeline: editor.state.timeline, stage: editor.state.stage, stageEnabled: editor.state.stageEnabled,
             captions: editor.state.captions, captionConfiguration: editor.state.captionConfiguration,
-            webcam: editor.state.webcam, shortcuts: editor.state.shortcuts, settings: settings, showsClickEffects: showsClickEffects)
+            webcam: editor.state.webcam, shortcuts: editor.state.shortcuts,
+            motionBlurAmount: editor.state.motionBlurAmount, settings: settings, showsClickEffects: showsClickEffects)
     }
 
     var body: some View {

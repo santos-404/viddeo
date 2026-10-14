@@ -23,20 +23,25 @@ struct ExportEdit: Sendable {
     var webcam: WebcamConfiguration?
     /// Captured shortcut presses (source time) and the overlay settings; nil unless the overlay is enabled.
     var shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)?
+    /// Motion blur 0...1 for the cursor and the screen zoom (one shared setting). Nil uses the
+    /// session's `cursor-config.json`, or the default 1 when absent.
+    var motionBlurAmount: Double?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
          audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil,
-         shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil) {
+         shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil,
+         motionBlurAmount: Double? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
         self.audio = audio.flatMap { $0.isExportNeutral ? nil : $0 }
         self.webcam = webcam
         self.shortcuts = shortcuts.flatMap { $0.configuration.enabled && !$0.events.isEmpty ? $0 : nil }
+        self.motionBlurAmount = motionBlurAmount
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
