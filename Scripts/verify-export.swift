@@ -193,9 +193,10 @@ struct VerifyExport {
         try await verifyPresets(session: session, directory: directory, duration: duration)
         try await verifyGIF(session: session, directory: directory, duration: duration)
         try await verifyEdits(root: directory, width: width, height: height, duration: duration)
+        try await verifyAudioMix(root: directory, width: width, height: height, duration: duration)
 
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; rendered cursor, typing and segment hiding.")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track); rendered cursor, typing and segment hiding.")
     }
 
     @MainActor
@@ -673,6 +674,122 @@ struct VerifyExport {
                     row[offset] = color.2; row[offset + 1] = color.1; row[offset + 2] = color.0
                 }
                 row[offset + 3] = 255
+            }
+        }
+    }
+
+    // MARK: Audio mix (master volume, mutes, microphone cleanup, click sounds)
+
+    /// Constant tones: system 440 Hz, microphone 880 Hz, so levels and frequencies identify each
+    /// source. Clicks at 1.0 s (separate press/release) and 3.0 s (merged click) identify click audio.
+    @MainActor
+    private static func verifyAudioMix(root: URL, width: Int, height: Int, duration: Double) async throws {
+        let directory = root.appendingPathComponent("audio-mix-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let rawURL = directory.appendingPathComponent("raw.mp4")
+        try await makeFixture(url: rawURL, width: width, height: height, duration: duration)
+        let systemURL = directory.appendingPathComponent("system.wav")
+        let microphoneURL = directory.appendingPathComponent("microphone.wav")
+        try writeToneWAV(to: systemURL, duration: duration) { _ in 440 }
+        try writeToneWAV(to: microphoneURL, duration: duration) { _ in 880 }
+        try await muxAudio(into: rawURL, directory: directory, tones: [systemURL, microphoneURL], duration: duration)
+        let session = RecordingSession(
+            id: UUID(), createdAt: Date(), displayID: 1, width: width, height: height, duration: duration,
+            events: [
+                CursorEvent(time: 1.0, x: 0.5, y: 0.5, kind: .down), CursorEvent(time: 1.12, x: 0.5, y: 0.5, kind: .up),
+                CursorEvent(time: 3.0, x: 0.5, y: 0.5, kind: .down), CursorEvent(time: 3.02, x: 0.5, y: 0.5, kind: .up)
+            ],
+            droppedFrames: 0, eventCaptureAvailable: true,
+            audio: AudioCaptureMetadata(systemAudioRequested: true, microphoneRequested: true,
+                                        systemAudioSamples: 1, microphoneSamples: 1,
+                                        systemAudioDroppedSamples: 0, microphoneDroppedSamples: 0)
+        )
+        try session.save(in: directory)
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+
+        func export(_ name: String, _ edit: ExportEdit?) async throws -> (asset: AVURLAsset, count: Int) {
+            let url = directory.appendingPathComponent("\(name).mp4")
+            try await OfflineExporter().export(session: session, directory: directory, destination: url,
+                                               showsClickEffects: false, settings: settings, edit: edit)
+            let asset = AVURLAsset(url: url)
+            return (asset, try await asset.loadTracks(withMediaType: .audio).count)
+        }
+        func measure(_ exported: (asset: AVURLAsset, count: Int), _ index: Int,
+                     from: Double, to: Double) async throws -> ToneMeasure {
+            let track = try await exported.asset.loadTracks(withMediaType: .audio)[index]
+            return analyze(try await decodeAudio(asset: exported.asset, track: track), from: from, to: to)
+        }
+
+        // A neutral configuration changes nothing: same two tracks and levels as no configuration.
+        var neutral = AudioMixConfiguration()
+        neutral.microphonePreset = .off
+        guard ExportEdit(audio: neutral).audio == nil, ExportEdit(audio: neutral).isEmpty else {
+            throw VerificationError.failed("a neutral audio configuration should be dropped from the export edit")
+        }
+        let baseline = try await export("audio-baseline", nil)
+        guard baseline.count == 2 else { throw VerificationError.failed("baseline export lacks two audio tracks") }
+        let baseSystem = try await measure(baseline, 0, from: 1, to: 5), baseMic = try await measure(baseline, 1, from: 1, to: 5)
+        guard baseSystem.rms > 0.05, baseMic.rms > 0.05 else {
+            throw VerificationError.failed("baseline tones are too quiet: \(baseSystem), \(baseMic)")
+        }
+
+        // Master volume 0.5 scales both sources, in the pass-through path and in the edited path.
+        var half = neutral
+        half.volume = 0.5
+        for (name, timeline) in [("audio-half-plain", nil as TimelineModel?), ("audio-half-edited", TimelineModel(sourceDuration: duration))] {
+            let exported = try await export(name, ExportEdit(timeline: timeline, audio: half))
+            guard exported.count == 2 else { throw VerificationError.failed("\(name) lost an audio track") }
+            let system = try await measure(exported, 0, from: 1, to: 5), mic = try await measure(exported, 1, from: 1, to: 5)
+            guard abs(system.rms / baseSystem.rms - 0.5) < 0.06, abs(mic.rms / baseMic.rms - 0.5) < 0.06,
+                  abs(system.frequency - 440) < 25, abs(mic.frequency - 880) < 40 else {
+                throw VerificationError.failed("\(name): volume 0.5 gave system \(system), microphone \(mic); baseline \(baseSystem), \(baseMic)")
+            }
+        }
+
+        // Mute + microphone cleanup (voice preset): the system track is silent, the cleaned microphone
+        // keeps its tone and its timing (starts with the video, spans the whole recording).
+        var voice = neutral
+        voice.muteSystemAudio = true
+        voice.microphonePreset = .voice
+        for (name, timeline) in [("audio-voice-plain", nil as TimelineModel?), ("audio-voice-edited", TimelineModel(sourceDuration: duration))] {
+            let exported = try await export(name, ExportEdit(timeline: timeline, audio: voice))
+            guard exported.count == 2 else { throw VerificationError.failed("\(name) lost an audio track") }
+            let system = try await measure(exported, 0, from: 1, to: 5), mic = try await measure(exported, 1, from: 1, to: 5)
+            guard system.rms < 0.002, abs(mic.frequency - 880) < 40, mic.rms > 0.02, mic.rms < baseMic.rms * 1.6 else {
+                throw VerificationError.failed("\(name): muted system \(system), cleaned microphone \(mic) (baseline \(baseMic))")
+            }
+            let range = try await exported.asset.loadTracks(withMediaType: .audio)[1].load(.timeRange)
+            guard abs(range.start.seconds) < 0.05, abs(range.end.seconds - duration) < 0.15 else {
+                throw VerificationError.failed("\(name): cleaned microphone spans \(range.start.seconds)…\(range.end.seconds)s of \(duration)s")
+            }
+            let early = try await measure(exported, 1, from: 0.1, to: 0.6), late = try await measure(exported, 1, from: duration - 0.6, to: duration - 0.1)
+            guard early.rms > 0.02, late.rms > 0.02 else {
+                throw VerificationError.failed("\(name): cleaned microphone is silent at the edges (\(early), \(late))")
+            }
+        }
+
+        // Click sounds add a third track whose energy sits at the click times only. Trimming to the
+        // first two seconds keeps the 1.0 s click and drops the 3.0 s one (source-time placement).
+        var clicks = neutral
+        clicks.clickSoundEffect = .crispClick
+        clicks.clickSoundEffectVolume = 1
+        var trimmed = TimelineModel(sourceDuration: duration)
+        let tail = try trimmed.split(atSource: 2)
+        try trimmed.delete(segmentID: tail)
+        for (name, timeline, expectsSecond) in [("audio-clicks-plain", nil as TimelineModel?, true), ("audio-clicks-trimmed", trimmed, false)] {
+            let exported = try await export(name, ExportEdit(timeline: timeline, audio: clicks))
+            guard exported.count == 3 else {
+                throw VerificationError.failed("\(name) has \(exported.count) audio tracks, expected the two sources plus clicks")
+            }
+            let first = try await measure(exported, 2, from: 0.99, to: 1.2)
+            let quiet = try await measure(exported, 2, from: 1.5, to: 1.9)
+            let second = try await measure(exported, 2, from: 2.99, to: 3.1)
+            guard first.rms > 0.01, quiet.rms < 0.0005, expectsSecond ? second.rms > 0.01 : second.rms < 0.0005 else {
+                throw VerificationError.failed("\(name): click energy at 1 s \(first), between \(quiet), at 3 s \(second)")
+            }
+            let sourceTone = try await measure(exported, 1, from: 0.5, to: 1.9)
+            guard abs(sourceTone.rms - baseMic.rms) < baseMic.rms * 0.1 else {
+                throw VerificationError.failed("\(name): microphone changed to \(sourceTone) (baseline \(baseMic))")
             }
         }
     }

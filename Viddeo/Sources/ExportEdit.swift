@@ -15,19 +15,25 @@ struct ExportEdit: Sendable {
     /// screen for its source duration × the segment's `timeScale` of output time, and cues
     /// inside trimmed footage never appear.
     var captions: (track: CaptionTrack, configuration: CaptionConfiguration)?
+    /// Master volume, mutes, microphone cleanup and click sounds. A configuration that would not
+    /// change the audio is dropped, so the neutral case is exactly the original pass-through export.
+    var audio: AudioMixConfiguration?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
-         captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil) {
+         captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
+         audio: AudioMixConfiguration? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
+        self.audio = audio.flatMap { $0.isExportNeutral ? nil : $0 }
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
-    /// when the configuration is enabled and the track has cues. Absent files leave the field nil;
+    /// when the configuration is enabled and the track has cues, `audio-config.json` → the audio mix
+    /// when it changes anything. Absent files leave the field nil;
     /// present but invalid files throw.
     static func load(from directory: URL, session: RecordingSession) throws -> ExportEdit {
         let manager = FileManager.default
@@ -44,6 +50,10 @@ struct ExportEdit: Sendable {
         if let track = try CaptionTrack.load(from: directory), !track.cues.isEmpty {
             let configuration = try CaptionConfiguration.load(in: directory)
             if configuration.enabled { edit.captions = (track, configuration) }
+        }
+        if manager.fileExists(atPath: directory.appendingPathComponent("audio-config.json").path) {
+            let audio = try AudioMixConfiguration.load(in: directory)
+            edit.audio = audio.isExportNeutral ? nil : audio
         }
         return edit
     }

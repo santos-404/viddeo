@@ -53,6 +53,20 @@ struct VerifyEditor {
         try check(reopened.save(presetID: "custom-preset"), "save disabled stage")
         try check(try ExportEdit.load(from: directory, session: session).stage == nil, "sidecar loader respects disabled stage")
         try check(FileManager.default.fileExists(atPath: directory.appendingPathComponent("stage-config.json").path), "disabled stage preserves style")
+        // Audio: the default is neutral (no export change); edits are undoable, validated, saved and exported.
+        try check(reopened.state.audio.microphonePreset == .off && reopened.exportEdit.audio == nil, "audio defaults are export-neutral")
+        reopened.edit { $0.audio.microphonePreset = .voice; $0.audio.muteSystemAudio = true }
+        try check(reopened.exportEdit.audio?.microphonePreset == .voice && reopened.exportEdit.audio?.muteSystemAudio == true, "unsaved audio settings reach the export")
+        let withAudio = reopened.state
+        reopened.edit { $0.audio.volume = 9 }
+        try check(reopened.state == withAudio && reopened.error != nil, "invalid audio volume rolls back")
+        reopened.edit { $0.audio.clickSoundEffect = .softClick }
+        reopened.undo()
+        try check(reopened.state == withAudio, "audio undo")
+        try check(reopened.save(presetID: "custom-preset"), "audio saved")
+        try check(try AudioMixConfiguration.load(in: directory) == withAudio.audio, "audio-config.json roundtrip")
+        try check(try ExportEdit.load(from: directory, session: session).audio == withAudio.audio, "sidecar loader reads audio")
+        try check(try EditorModel(session: session, directory: directory).state.audio == withAudio.audio, "reopened editor keeps audio")
         let bytes = try Data(contentsOf: directory.appendingPathComponent("session.json"))
         reopened.edit { try $0.timeline.trim(segmentID: $0.timeline.segments[0].id, newStart: 1, newEnd: 3) }
         try check(reopened.save(presetID: "custom-preset"), "trim saved")

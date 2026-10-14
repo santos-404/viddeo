@@ -22,6 +22,7 @@ struct EditorView: View {
                 timeline.tabItem { Text("Timeline") }
                 stage.tabItem { Text("Background") }
                 captions.tabItem { Text("Captions") }
+                audio.tabItem { Text("Audio") }
             }
             .frame(minHeight: 300)
             if editor.isWorking { ProgressView().controlSize(.small) }
@@ -151,6 +152,54 @@ struct EditorView: View {
                     }
                 }
             }
+        }.padding(12)
+    }
+
+    private var audio: some View {
+        let hasMicrophone = editor.session.audio?.microphoneSamples ?? 0 > 0
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Master volume").frame(width: 110, alignment: .leading)
+                Slider(value: Binding(get: { editor.state.audio.volume }, set: { value in
+                    editor.edit({ $0.audio.volume = value }, key: "audio-volume")
+                }), in: 0...2)
+                Text(editor.state.audio.volume.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+            }
+            HStack {
+                Toggle("Mute microphone", isOn: Binding(get: { editor.state.audio.muteMicrophone }, set: { muted in
+                    editor.edit { $0.audio.muteMicrophone = muted }
+                }))
+                Toggle("Mute system audio", isOn: Binding(get: { editor.state.audio.muteSystemAudio }, set: { muted in
+                    editor.edit { $0.audio.muteSystemAudio = muted }
+                }))
+            }
+            Picker("Microphone cleanup", selection: Binding(get: { editor.state.audio.microphonePreset }, set: { preset in
+                editor.edit { $0.audio.microphonePreset = preset }
+            })) {
+                Text("Off").tag(MicrophonePreset.off)
+                Text("Voice").tag(MicrophonePreset.voice)
+                Text("Noise reduction").tag(MicrophonePreset.noiseReduction)
+                Text("Podcast").tag(MicrophonePreset.podcast)
+            }
+            .disabled(!hasMicrophone)
+            Picker("Click sound", selection: Binding(get: { editor.state.audio.clickSoundEffect }, set: { set in
+                editor.edit { $0.audio.clickSoundEffect = set }
+            })) {
+                Text("None").tag(Optional<ClickSoundSet>.none)
+                Text("Soft click").tag(Optional(ClickSoundSet.softClick))
+                Text("Crisp click").tag(Optional(ClickSoundSet.crispClick))
+            }
+            HStack {
+                Text("Click volume").frame(width: 110, alignment: .leading)
+                Slider(value: Binding(get: { editor.state.audio.clickSoundEffectVolume }, set: { value in
+                    editor.edit({ $0.audio.clickSoundEffectVolume = value }, key: "click-volume")
+                }), in: 0...1)
+                Text(editor.state.audio.clickSoundEffectVolume.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+            }
+            .disabled(editor.state.audio.clickSoundEffect == nil)
+            Text("Applied to MP4 exports: cleanup replaces the exported microphone track, click sounds add a separate track. Cleanup is viddeo's own DSP, not Screen Studio's model.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
         }.padding(12)
     }
 

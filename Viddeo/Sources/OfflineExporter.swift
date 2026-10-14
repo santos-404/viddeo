@@ -166,7 +166,8 @@ final class OfflineExporter {
                                         duration: outputDuration.seconds, settings: settings, progress: progress)
             return [outputURL]
         }
-        let audioRoles = edit?.timeline == nil ? nil
+        let mix = edit?.audio
+        let audioRoles = edit?.timeline == nil && mix == nil ? nil
             : try await ExportAudioTrack.roles(of: asset.loadTracks(withMediaType: .audio), session: session)
 
         // Render every codec to a hidden sibling first, then move all of them into place, so
@@ -182,7 +183,7 @@ final class OfflineExporter {
                 try await Self.writeMovie(
                     source: sourceURL, destination: temporaryURL, codec: output.codec,
                     renderer: renderer, duration: outputDuration, sourceDuration: duration,
-                    audioRoles: audioRoles, settings: settings,
+                    audioRoles: audioRoles, mix: mix, events: session.events, settings: settings,
                     progress: progress.map { report in
                         { @Sendable value in report((Double(index) + value) * share) }
                     }
@@ -204,10 +205,12 @@ final class OfflineExporter {
 
     /// Decodes each source audio track to PCM and re-encodes it as its own AAC track, so
     /// system audio and microphone stay separate in the export. `duration` is the output
-    /// (playback) duration; `audioRoles` is non-nil exactly when the renderer has a timeline.
+    /// (playback) duration; `audioRoles` is non-nil when the renderer has a timeline or `mix` is set.
+    /// `mix` adds microphone cleanup, master volume/mutes and a click-sound track (from `events`).
     private nonisolated static func writeMovie(
         source: URL, destination: URL, codec: ExportCodec, renderer: ExportFrameRenderer,
         duration: CMTime, sourceDuration: CMTime, audioRoles: [ExportAudioTrack.Role]?,
+        mix: AudioMixConfiguration?, events: [CursorEvent],
         settings: ExportSettings, progress: (@Sendable (Double) -> Void)?
     ) async throws {
         let asset = AVURLAsset(url: source)
@@ -252,15 +255,40 @@ final class OfflineExporter {
         guard writer.canAdd(videoInput) else { throw ExportError.unsupportedOutput("cannot add a video track") }
         writer.add(videoInput)
 
+        // Derived audio (cleaned microphone, click sounds) lives in a scratch folder for this export only.
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("viddeo-export-audio-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        if mix != nil { try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true) }
+
         var audio: [ExportAudioTrack] = []
-        for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
+        func addAudio(asset trackAsset: AVAsset, track: AVAssetTrack, role: ExportAudioTrack.Role) async throws {
+            let gain = ExportAudioPreparation.gain(for: role, mix: mix)
             if let timeline = renderer.edit {
-                let role = audioRoles.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? .unknown
                 audio.append(try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
-                                                        playbackDuration: duration.seconds, writer: writer))
+                                                        playbackDuration: duration.seconds, gain: gain, writer: writer))
             } else {
-                audio.append(try await ExportAudioTrack(asset: asset, track: track, timeRange: timeRange, writer: writer))
+                audio.append(try await ExportAudioTrack(asset: trackAsset, track: track, timeRange: timeRange,
+                                                        gain: gain, writer: writer))
             }
+        }
+
+        for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
+            let role = audioRoles.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? .unknown
+            if let mix, role == .microphone,
+               let cleaned = try await ExportAudioPreparation.cleanedMicrophone(
+                   asset: asset, track: track, preset: mix.microphonePreset,
+                   limiterCeilingDB: mix.limiterCeilingDB, directory: scratch) {
+                try await addAudio(asset: cleaned.asset, track: cleaned.track, role: role)
+            } else {
+                try await addAudio(asset: asset, track: track, role: role)
+            }
+        }
+        if let mix, let set = mix.clickSoundEffect,
+           let clicks = try await ExportAudioPreparation.clickSounds(
+               events: events, set: set, volume: mix.clickSoundEffectVolume,
+               duration: sourceDuration.seconds, directory: scratch) {
+            try await addAudio(asset: clicks.asset, track: clicks.track, role: .clicks)
         }
 
         func cancelAll() {

@@ -16,7 +16,8 @@ import Foundation
 /// and any shortfall at the end, are filled with silence so the track ends at the playback
 /// duration.
 final class ExportAudioTrack {
-    enum Role: Sendable { case microphone, system, unknown }
+    /// `clicks` is viddeo's synthesized click-sound track; segment volumes do not apply to it.
+    enum Role: Sendable { case microphone, system, clicks, unknown }
 
     let input: AVAssetWriterInput
     private let reader: AVAssetReader?
@@ -36,12 +37,25 @@ final class ExportAudioTrack {
     private var readerFinished = false
     private var pending: CMSampleBuffer?
 
-    /// Pass-through: decodes `track` over `timeRange` exactly as before edits existed.
-    init(asset: AVAsset, track: AVAssetTrack, timeRange: CMTimeRange, writer: AVAssetWriter) async throws {
+    /// Pass-through: decodes `track` over `timeRange` exactly as before edits existed. A `gain` other
+    /// than 1 (master volume or a mute) goes through an audio mix, which is the only change.
+    init(asset: AVAsset, track: AVAssetTrack, timeRange: CMTimeRange, gain: Float = 1,
+         writer: AVAssetWriter) async throws {
         let (sampleRate, channels) = try await Self.format(of: track)
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = timeRange
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: Self.pcmSettings(sampleRate, channels))
+        let output: AVAssetReaderOutput
+        if gain == 1 {
+            output = AVAssetReaderTrackOutput(track: track, outputSettings: Self.pcmSettings(sampleRate, channels))
+        } else {
+            let parameters = AVMutableAudioMixInputParameters(track: track)
+            parameters.setVolume(gain, at: .zero)
+            let mix = AVMutableAudioMix()
+            mix.inputParameters = [parameters]
+            let mixOutput = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: Self.pcmSettings(sampleRate, channels))
+            mixOutput.audioMix = mix
+            output = mixOutput
+        }
         output.alwaysCopiesSampleData = false
         input = try Self.addInput(to: writer, reader: reader, output: output, sampleRate: sampleRate,
                                   channels: channels, trackID: track.trackID)
@@ -50,8 +64,9 @@ final class ExportAudioTrack {
         edited = nil
     }
 
-    /// Edited: `track` assembled per `plan`, gain chosen by `role`, `playbackDuration` long.
-    init(track: AVAssetTrack, role: Role, plan: [EditPlanItem], playbackDuration: Double,
+    /// Edited: `track` assembled per `plan`, gain chosen by `role` and multiplied by `gain` (master
+    /// volume or a mute), `playbackDuration` long.
+    init(track: AVAssetTrack, role: Role, plan: [EditPlanItem], playbackDuration: Double, gain extraGain: Float = 1,
          writer: AVAssetWriter) async throws {
         let (sampleRate, channels) = try await Self.format(of: track)
         let trackRange = try await track.load(.timeRange)
@@ -86,7 +101,12 @@ final class ExportAudioTrack {
                 target.scaleTimeRange(CMTimeRange(start: cursor, duration: source.duration), toDuration: scaled)
                 length = scaled
             }
-            let gain = Float(role == .system ? item.systemVolume : item.volume)
+            let segmentGain: Float = switch role {
+            case .system: Float(item.systemVolume)
+            case .clicks: 1
+            case .microphone, .unknown: Float(item.volume)
+            }
+            let gain = segmentGain * extraGain
             if gain != 1 {
                 gains.append((Int64((cursor.seconds * sampleRate).rounded()),
                               Int64(((cursor + length).seconds * sampleRate).rounded()), gain))
@@ -303,5 +323,63 @@ final class ExportAudioTrack {
             if ordered.count == tracks.count { return ordered }
         }
         return roles
+    }
+}
+
+/// Audio sources the exporter derives from an `AudioMixConfiguration` before encoding: a cleaned
+/// microphone and a synthesized click track. Each is written as a temporary 48 kHz CAF in `directory`
+/// and read back through AVFoundation, so the normal per-source AAC path encodes it.
+enum ExportAudioPreparation {
+    struct Source {
+        var asset: AVURLAsset
+        var track: AVAssetTrack
+    }
+
+    /// Runs `track` through the preset's DSP chain. Returns nil when the track holds no audio, in which
+    /// case the original track is exported unchanged. The result is delayed by the original track's
+    /// start offset, because decoding drops timestamps and the exporter addresses audio by source time.
+    static func cleanedMicrophone(asset: AVAsset, track: AVAssetTrack, preset: MicrophonePreset,
+                                  limiterCeilingDB: Double, directory: URL) async throws -> Source? {
+        guard preset != .off else { return nil }
+        var audio = try await AudioFileIO.decode(asset: asset, track: track)
+        guard audio.frameCount > 0 else { return nil }
+        try Task.checkCancellation()
+        audio = try VoiceCleanup.process(audio, preset: preset, limiterCeilingDB: limiterCeilingDB)
+        let start = try await track.load(.timeRange).start.seconds
+        if start.isFinite, start > 0.0005 {
+            let lead = Int((start * audio.sampleRate).rounded())
+            audio.channels = audio.channels.map { [Float](repeating: 0, count: lead) + $0 }
+        }
+        return try await write(audio, named: "microphone-\(preset.rawValue)", directory: directory)
+    }
+
+    /// One mono track with the click set's samples at each press/release. Nil when there are no events.
+    static func clickSounds(events: [CursorEvent], set: ClickSoundSet, volume: Double, duration: Double,
+                            directory: URL) async throws -> Source? {
+        guard events.contains(where: { $0.kind != .move }) else { return nil }
+        let samples = ClickSounds.render(events: events, set: set, volume: volume, duration: duration)
+        guard !samples.isEmpty else { return nil }
+        return try await write(PCMAudio(sampleRate: ClickSounds.sampleRate, channels: [samples]),
+                               named: "click-sounds", directory: directory)
+    }
+
+    /// The master volume and mute for one role. Segment volumes are applied separately, per segment.
+    static func gain(for role: ExportAudioTrack.Role, mix: AudioMixConfiguration?) -> Float {
+        guard let mix else { return 1 }
+        let source: Double = switch role {
+        case .microphone: mix.muteMicrophone ? 0 : 1
+        case .system: mix.muteSystemAudio ? 0 : 1
+        case .clicks, .unknown: 1
+        }
+        let gain = mix.volume * source
+        return gain.isFinite ? Float(max(0, gain)) : 1
+    }
+
+    private static func write(_ audio: PCMAudio, named name: String, directory: URL) async throws -> Source? {
+        let url = directory.appendingPathComponent("\(name).caf", isDirectory: false)
+        try AudioFileIO.write(audio, to: url)
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
+        return Source(asset: asset, track: track)
     }
 }

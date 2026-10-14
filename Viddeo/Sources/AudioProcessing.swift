@@ -52,6 +52,21 @@ struct AudioMixConfiguration: Codable, Sendable, Equatable {
             !name.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
 
+    /// True when exporting with this configuration would not change the recorded audio: the wired
+    /// settings (master volume, mutes, microphone preset, click sounds) are all at their no-op values.
+    /// Background music, the limiter and loudness target are not applied by the exporter yet.
+    var isExportNeutral: Bool {
+        volume == 1 && !muteMicrophone && !muteSystemAudio && microphonePreset == .off && clickSoundEffect == nil
+    }
+
+    /// viddeo's starting point for a project without `audio-config.json`: the observed defaults,
+    /// except that microphone cleanup is off (a design choice — it is lossy and opt-in).
+    static var editorDefault: Self {
+        var configuration = Self()
+        configuration.microphonePreset = .off
+        return configuration
+    }
+
     func backgroundAudioURL(in directory: URL) -> URL? {
         guard let name = backgroundAudioFileName, Self.isSafeFileName(name) else { return nil }
         return directory.appendingPathComponent(name, isDirectory: false)
@@ -140,6 +155,12 @@ enum AudioFileIO {
             }
         }
         guard let track = selected else { throw AudioProcessingError.missingAudioTrack(trackTitle ?? "audio") }
+        return try await decode(asset: asset, track: track, maxChannels: maxChannels)
+    }
+
+    /// Decodes one track to 48 kHz float PCM. Sample timestamps are ignored: the first decoded sample
+    /// is frame 0, so callers that care about a track's start offset must account for it themselves.
+    static func decode(asset: AVAsset, track: AVAssetTrack, maxChannels: Int = 2) async throws -> PCMAudio {
         let descriptions = try await track.load(.formatDescriptions)
         let sourceChannels = descriptions.first
             .flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee.mChannelsPerFrame } ?? 1
