@@ -14,10 +14,14 @@ Requires Xcode with a macOS 26+ SDK, selected by `xcode-select`.
 open .build/DerivedData/Build/Products/Debug/Viddeo.app
 ```
 
-The script builds `Viddeo/Viddeo.xcodeproj` and ad hoc signs bundle `com.viddeo.app`.
-No dependency installation is required. First launch may request Screen Recording
-permission. Allow Viddeo in System Settings → Privacy & Security → Screen Recording
-(or Screen & System Audio Recording), then reopen if macOS requests it.
+The script builds `Viddeo/Viddeo.xcodeproj` and uses the only valid Apple Development
+identity in the keychain when exactly one is available. Otherwise it signs ad hoc.
+Set `VIDDEO_SIGNING_IDENTITY` to select a specific identity when multiple are installed.
+Stable signing lets macOS recognize the app across rebuilds; ad-hoc identity changes can
+make Screen Recording permission appear to be missing after a rebuild. No dependency
+installation is required. First launch may request Screen Recording permission. Allow
+Viddeo in System Settings → Privacy & Security → Screen Recording (or Screen & System
+Audio Recording), then reopen if macOS requests it.
 
 For pointer tracking, allow Viddeo under **Input Monitoring**. A missing or
 interrupted event tap is reported in the UI and session metadata. Raw capture can

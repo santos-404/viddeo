@@ -54,7 +54,8 @@ It does not depend on recording state; overlays follow the same crop as raw vide
 
 Sources are in `Viddeo/Sources`; project `Viddeo/Viddeo.xcodeproj` links Apple
 frameworks directly. No third-party runtime/media engine. `Scripts/build.sh`
-builds and ad hoc signs. Standalone zoom and synthetic-export verifiers validate
+builds and uses a unique Apple Development identity when available, with ad-hoc signing
+as a fallback. Standalone zoom and synthetic-export verifiers validate
 math and media independently of screen permissions.
 
 ## Remaining seams
