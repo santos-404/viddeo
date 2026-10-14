@@ -67,6 +67,32 @@ struct VerifyEditor {
         try check(try AudioMixConfiguration.load(in: directory) == withAudio.audio, "audio-config.json roundtrip")
         try check(try ExportEdit.load(from: directory, session: session).audio == withAudio.audio, "sidecar loader reads audio")
         try check(try EditorModel(session: session, directory: directory).state.audio == withAudio.audio, "reopened editor keeps audio")
+        // Background music and mixdown: the file is copied into the session under a safe name, edits are undoable and persisted.
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("viddeo-music-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let musicSource = outside.appendingPathComponent(".hidden: song?.wav")
+        try Data("RIFF".utf8).write(to: musicSource)
+        reopened.setBackgroundMusic(from: musicSource)
+        let musicName = reopened.state.audio.backgroundAudioFileName
+        try check(musicName.map(AudioMixConfiguration.isSafeFileName) == true && reopened.error == nil, "music gets a safe single-component name")
+        try check(musicName.map { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) } == true, "music is copied into the session folder")
+        try check(reopened.exportEdit.audio?.backgroundAudioFileName == musicName && reopened.state.audio.backgroundAudioVolume == 0.05, "music reaches the export at volume 0.05")
+        reopened.setBackgroundMusic(from: musicSource)
+        try check(reopened.state.audio.backgroundAudioFileName != musicName, "a second import never overwrites the first copy")
+        reopened.undo()
+        try check(reopened.state.audio.backgroundAudioFileName == musicName, "music import is undoable")
+        reopened.edit { $0.audio.backgroundAudioVolume = 0.3; $0.audio.muteBackgroundAudio = true; $0.audio.mixdownSingleTrack = true; $0.audio.targetLoudnessLUFS = -14 }
+        let withMusic = reopened.state
+        reopened.edit { $0.audio.backgroundAudioFileName = "../escape.wav" }
+        try check(reopened.state == withMusic && reopened.error != nil, "unsafe music name rolls back")
+        reopened.removeBackgroundMusic()
+        try check(reopened.state.audio.backgroundAudioFileName == nil && reopened.exportEdit.audio?.mixdownSingleTrack == true, "music removed, mixdown kept")
+        reopened.undo()
+        try check(reopened.state == withMusic, "music removal is undoable")
+        try check(reopened.save(presetID: "custom-preset"), "music settings saved")
+        try check(try AudioMixConfiguration.load(in: directory) == withMusic.audio, "music and mixdown roundtrip through audio-config.json")
+        try check(try EditorModel(session: session, directory: directory).state.audio == withMusic.audio, "reopened editor keeps music and mixdown")
         // Camera: sessions without one never export or save overlay settings; sessions with one do.
         try check(reopened.exportEdit.webcam == nil, "no camera, no overlay settings")
         try check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("webcam-config.json").path), "no camera, no webcam-config.json")

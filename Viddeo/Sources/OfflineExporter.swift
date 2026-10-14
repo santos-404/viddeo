@@ -46,32 +46,8 @@ final class OfflineExporter {
                 showsClickEffects: Bool = true, settings: ExportSettings = .mp4Default,
                 edit: ExportEdit? = nil,
                 progress: (@Sendable (Double) -> Void)? = nil) async throws -> [URL] {
-        guard session.version == 1 else {
-            throw ExportError.invalidSession("unsupported session version \(session.version)")
-        }
-        guard (2...8192).contains(session.width), (2...8192).contains(session.height),
-              session.duration.isFinite, session.duration > 0, session.duration <= 12 * 60 * 60,
-              session.events.count <= 250_000, (session.keystrokes?.count ?? 0) <= 250_000 else {
-            throw ExportError.invalidSession("dimensions, duration, or event count exceed supported bounds")
-        }
-        let filename = session.videoFilename
-        guard !filename.isEmpty, filename != ".", filename != "..",
-              URL(fileURLWithPath: filename).lastPathComponent == filename,
-              !filename.contains("/") else {
-            throw ExportError.invalidSession("videoFilename must be a simple filename in the session directory")
-        }
-        guard directory.isFileURL, destination.isFileURL else {
-            throw ExportError.invalidSession("source and destination must be file URLs")
-        }
-        try settings.validate()
-        let settings = settings.normalized()
-
-        let sessionDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
-        let sourceURL = sessionDirectory.appendingPathComponent(session.videoFilename, isDirectory: false)
-            .standardizedFileURL.resolvingSymlinksInPath()
-        guard sourceURL.deletingLastPathComponent() == sessionDirectory else {
-            throw ExportError.invalidSession("videoFilename must resolve inside the session directory")
-        }
+        let (settings, sessionDirectory, sourceURL) = try Self.resolveSource(
+            session: session, directory: directory, destination: destination, settings: settings)
         let outputURL = destination.standardizedFileURL
         let outputs: [(codec: ExportCodec, url: URL)] = settings.format == .gif
             ? [(.h264, outputURL)]
@@ -86,6 +62,114 @@ final class OfflineExporter {
             }
         }
 
+        let asset = AVURLAsset(url: sourceURL)
+        let prepared = try await Self.makeRenderer(
+            session: session, directory: directory, settings: settings, edit: edit, showsClickEffects: showsClickEffects)
+        let renderer = prepared.renderer
+        let outputDuration = prepared.outputDuration
+        let duration = prepared.sourceDuration
+        let frameCount = ExportFrameRenderer.frameCount(duration: outputDuration.seconds, fps: settings.fps)
+
+        if settings.format == .gif {
+            guard frameCount <= GifExporter.maximumFrames else {
+                throw ExportError.tooManyGIFFrames(count: frameCount, limit: GifExporter.maximumFrames)
+            }
+            try await GifExporter.write(source: sourceURL, destination: outputURL, renderer: renderer,
+                                        duration: outputDuration.seconds, settings: settings, progress: progress)
+            return [outputURL]
+        }
+        let mix = edit?.audio
+        let audioRoles = edit?.timeline == nil && mix == nil ? nil
+            : try await ExportAudioTrack.roles(of: asset.loadTracks(withMediaType: .audio), session: session)
+
+        // Render every codec to a hidden sibling first, then move all of them into place, so
+        // a failure or cancellation never leaves one finished file of a requested pair.
+        var temporaryURLs: [URL] = []
+        var movedURLs: [URL] = []
+        do {
+            for (index, output) in outputs.enumerated() {
+                let temporaryURL = output.url.deletingLastPathComponent()
+                    .appendingPathComponent(".\(output.url.lastPathComponent).\(UUID().uuidString).partial.mp4")
+                temporaryURLs.append(temporaryURL)
+                let share = 1 / Double(outputs.count)
+                try await Self.writeMovie(
+                    source: sourceURL, destination: temporaryURL, codec: output.codec,
+                    renderer: renderer, duration: outputDuration, sourceDuration: duration,
+                    audioRoles: audioRoles, mix: mix, events: session.events, sessionDirectory: sessionDirectory,
+                    settings: settings,
+                    progress: progress.map { report in
+                        { @Sendable value in report((Double(index) + value) * share) }
+                    }
+                )
+            }
+            for (temporaryURL, output) in zip(temporaryURLs, outputs) {
+                // Moving into place fails if another process created the destination while
+                // encoding, so the completed render cannot replace that file either.
+                try FileManager.default.moveItem(at: temporaryURL, to: output.url)
+                movedURLs.append(output.url)
+            }
+        } catch {
+            for url in temporaryURLs + movedURLs { try? FileManager.default.removeItem(at: url) }
+            throw error
+        }
+        progress?(1)
+        return movedURLs
+    }
+
+    /// Everything a frame loop needs: the renderer (which carries the timeline, stage, captions,
+    /// cursor, click effects and camera plan), the output (playback) duration and the raw recording's
+    /// duration. `export` and the editor preview both build it here, so they cannot drift.
+    struct PreparedRender: Sendable {
+        var renderer: ExportFrameRenderer
+        var outputDuration: CMTime
+        var sourceDuration: CMTime
+        var sourceURL: URL
+        /// The validated, normalized settings the renderer was sized from.
+        var settings: ExportSettings
+    }
+
+    /// Session, settings and path validation shared by `export` and `makeRenderer`. Returns the
+    /// normalized settings, the resolved session directory and the raw recording's URL.
+    nonisolated static func resolveSource(
+        session: RecordingSession, directory: URL, destination: URL?, settings: ExportSettings
+    ) throws -> (settings: ExportSettings, sessionDirectory: URL, sourceURL: URL) {
+        guard session.version == 1 else {
+            throw ExportError.invalidSession("unsupported session version \(session.version)")
+        }
+        guard (2...8192).contains(session.width), (2...8192).contains(session.height),
+              session.duration.isFinite, session.duration > 0, session.duration <= 12 * 60 * 60,
+              session.events.count <= 250_000, (session.keystrokes?.count ?? 0) <= 250_000 else {
+            throw ExportError.invalidSession("dimensions, duration, or event count exceed supported bounds")
+        }
+        let filename = session.videoFilename
+        guard !filename.isEmpty, filename != ".", filename != "..",
+              URL(fileURLWithPath: filename).lastPathComponent == filename,
+              !filename.contains("/") else {
+            throw ExportError.invalidSession("videoFilename must be a simple filename in the session directory")
+        }
+        guard directory.isFileURL, destination?.isFileURL ?? true else {
+            throw ExportError.invalidSession("source and destination must be file URLs")
+        }
+        try settings.validate()
+        let settings = settings.normalized()
+
+        let sessionDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let sourceURL = sessionDirectory.appendingPathComponent(session.videoFilename, isDirectory: false)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard sourceURL.deletingLastPathComponent() == sessionDirectory else {
+            throw ExportError.invalidSession("videoFilename must resolve inside the session directory")
+        }
+        return (settings, sessionDirectory, sourceURL)
+    }
+
+    /// Validates the recording and builds the frame renderer. `previewWidth` renders the same
+    /// output at a reduced width (smaller than the preset's) for the editor preview; nil is the export size.
+    nonisolated static func makeRenderer(
+        session: RecordingSession, directory: URL, settings: ExportSettings,
+        edit: ExportEdit?, showsClickEffects: Bool, previewWidth: Int? = nil
+    ) async throws -> PreparedRender {
+        let (settings, sessionDirectory, sourceURL) = try resolveSource(
+            session: session, directory: directory, destination: nil, settings: settings)
         let asset = AVURLAsset(url: sourceURL)
         let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = tracks.first else { throw ExportError.missingVideoTrack }
@@ -126,7 +210,11 @@ final class OfflineExporter {
         let clickTimeline = showsClickEffects
             ? ClickEffectTimeline(events: session.events, duration: session.duration,
                                   configuration: try ClickEffectConfiguration.load(in: directory)) : nil
-        let size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+        var size = settings.outputSize(sourceWidth: session.width, sourceHeight: session.height)
+        if let previewWidth, previewWidth > 0, previewWidth < size.width {
+            // Reduced-size preview: same aspect ratio (up to even rounding), same renderer.
+            size = (previewWidth, ExportSettings.evenFloor(Double(previewWidth) * Double(size.height) / Double(size.width)))
+        }
         if let timeline = edit?.timeline {
             do { try timeline.validate() } catch {
                 throw ExportError.invalidSession("the timeline is invalid: \(error.localizedDescription)")
@@ -164,61 +252,20 @@ final class OfflineExporter {
         }
         // The output runs in playback time; without a timeline that is the recording itself.
         let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
-        let frameCount = ExportFrameRenderer.frameCount(duration: outputDuration.seconds, fps: settings.fps)
-
-        if settings.format == .gif {
-            guard frameCount <= GifExporter.maximumFrames else {
-                throw ExportError.tooManyGIFFrames(count: frameCount, limit: GifExporter.maximumFrames)
-            }
-            try await GifExporter.write(source: sourceURL, destination: outputURL, renderer: renderer,
-                                        duration: outputDuration.seconds, settings: settings, progress: progress)
-            return [outputURL]
-        }
-        let mix = edit?.audio
-        let audioRoles = edit?.timeline == nil && mix == nil ? nil
-            : try await ExportAudioTrack.roles(of: asset.loadTracks(withMediaType: .audio), session: session)
-
-        // Render every codec to a hidden sibling first, then move all of them into place, so
-        // a failure or cancellation never leaves one finished file of a requested pair.
-        var temporaryURLs: [URL] = []
-        var movedURLs: [URL] = []
-        do {
-            for (index, output) in outputs.enumerated() {
-                let temporaryURL = output.url.deletingLastPathComponent()
-                    .appendingPathComponent(".\(output.url.lastPathComponent).\(UUID().uuidString).partial.mp4")
-                temporaryURLs.append(temporaryURL)
-                let share = 1 / Double(outputs.count)
-                try await Self.writeMovie(
-                    source: sourceURL, destination: temporaryURL, codec: output.codec,
-                    renderer: renderer, duration: outputDuration, sourceDuration: duration,
-                    audioRoles: audioRoles, mix: mix, events: session.events, settings: settings,
-                    progress: progress.map { report in
-                        { @Sendable value in report((Double(index) + value) * share) }
-                    }
-                )
-            }
-            for (temporaryURL, output) in zip(temporaryURLs, outputs) {
-                // Moving into place fails if another process created the destination while
-                // encoding, so the completed render cannot replace that file either.
-                try FileManager.default.moveItem(at: temporaryURL, to: output.url)
-                movedURLs.append(output.url)
-            }
-        } catch {
-            for url in temporaryURLs + movedURLs { try? FileManager.default.removeItem(at: url) }
-            throw error
-        }
-        progress?(1)
-        return movedURLs
+        return PreparedRender(renderer: renderer, outputDuration: outputDuration, sourceDuration: duration,
+                              sourceURL: sourceURL, settings: settings)
     }
 
     /// Decodes each source audio track to PCM and re-encodes it as its own AAC track, so
     /// system audio and microphone stay separate in the export. `duration` is the output
     /// (playback) duration; `audioRoles` is non-nil when the renderer has a timeline or `mix` is set.
-    /// `mix` adds microphone cleanup, master volume/mutes and a click-sound track (from `events`).
+    /// `mix` adds microphone cleanup, master volume/mutes, a click-sound track (from `events`) and
+    /// background music (from `sessionDirectory`); with `mix.mixdownSingleTrack` all of them are summed
+    /// into one limited stereo AAC track instead of separate tracks.
     private nonisolated static func writeMovie(
         source: URL, destination: URL, codec: ExportCodec, renderer: ExportFrameRenderer,
         duration: CMTime, sourceDuration: CMTime, audioRoles: [ExportAudioTrack.Role]?,
-        mix: AudioMixConfiguration?, events: [CursorEvent],
+        mix: AudioMixConfiguration?, events: [CursorEvent], sessionDirectory: URL,
         settings: ExportSettings, progress: (@Sendable (Double) -> Void)?
     ) async throws {
         let asset = AVURLAsset(url: source)
@@ -271,16 +318,31 @@ final class OfflineExporter {
         defer { try? FileManager.default.removeItem(at: scratch) }
         if mix != nil { try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true) }
 
+        // Missing music fails before anything is encoded.
+        var music: PCMAudio?
+        if let mix {
+            music = try await ExportAudioPreparation.backgroundMusic(mix: mix, sessionDirectory: sessionDirectory,
+                                                                     duration: duration.seconds)
+        }
+        let mixdown = mix?.mixdownSingleTrack == true
+
+        // Separate tracks go to the writer; mixdown sources (no writer) are rendered to PCM and summed.
         var audio: [ExportAudioTrack] = []
+        var mixSources: [ExportAudioTrack] = []
         func addAudio(asset trackAsset: AVAsset, track: AVAssetTrack, role: ExportAudioTrack.Role) async throws {
             let gain = ExportAudioPreparation.gain(for: role, mix: mix)
+            let target: AVAssetWriter? = mixdown ? nil : writer
+            let rate: Double? = mixdown ? AudioFileIO.sampleRate : nil
+            let exportTrack: ExportAudioTrack
             if let timeline = renderer.edit {
-                audio.append(try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
-                                                        playbackDuration: duration.seconds, gain: gain, writer: writer))
+                exportTrack = try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
+                                                         playbackDuration: duration.seconds, gain: gain,
+                                                         writer: target, sampleRate: rate)
             } else {
-                audio.append(try await ExportAudioTrack(asset: trackAsset, track: track, timeRange: timeRange,
-                                                        gain: gain, writer: writer))
+                exportTrack = try await ExportAudioTrack(asset: trackAsset, track: track, timeRange: timeRange,
+                                                         gain: gain, writer: target, sampleRate: rate)
             }
+            if mixdown { mixSources.append(exportTrack) } else { audio.append(exportTrack) }
         }
 
         for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
@@ -299,6 +361,36 @@ final class OfflineExporter {
                events: events, set: set, volume: mix.clickSoundEffectVolume,
                duration: sourceDuration.seconds, directory: scratch) {
             try await addAudio(asset: clicks.asset, track: clicks.track, role: .clicks)
+        }
+        if let mix, mixdown {
+            // One stereo track: every source in playback time, summed with its gain, then optional
+            // loudness normalization and the limiter.
+            let frameCount = Int((duration.seconds * AudioFileIO.sampleRate).rounded())
+            var summed: [(audio: PCMAudio, track: MixTrack)] = []
+            do {
+                for source in mixSources {
+                    try source.start()
+                    summed.append((try source.renderPCM(), MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .systemAudio)))
+                }
+            } catch {
+                for source in mixSources { source.cancel() }
+                throw error
+            }
+            if let music { summed.append((music, MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .backgroundAudio))) }
+            if summed.contains(where: { $0.audio.frameCount > 0 }), frameCount > 0 {
+                var mixed = AudioMixer.sum(summed, frameCount: frameCount)
+                summed = []
+                AudioMixer.finalize(&mixed, limiterCeilingDB: mix.limiterCeilingDB, targetLoudnessLUFS: mix.targetLoudnessLUFS)
+                if let file = try await ExportAudioPreparation.write(mixed, named: "mixdown", directory: scratch) {
+                    audio.append(try await ExportAudioTrack(
+                        asset: file.asset, track: file.track,
+                        timeRange: CMTimeRange(start: .zero, duration: duration), writer: writer))
+                }
+            }
+        } else if let music, let file = try await ExportAudioPreparation.write(music, named: "background-music", directory: scratch) {
+            // Already in playback time with gain and fade baked in, so it bypasses the edit plan.
+            audio.append(try await ExportAudioTrack(asset: file.asset, track: file.track,
+                                                    timeRange: CMTimeRange(start: .zero, duration: duration), writer: writer))
         }
 
         func cancelAll() {
@@ -357,14 +449,15 @@ final class OfflineExporter {
                     }
                 }
                 for (index, track) in audio.enumerated() where !audioFinished[index] {
+                    guard let input = track.input else { audioFinished[index] = true; continue }
                     var appended = 0
-                    while appended < 16, track.input.isReadyForMoreMediaData {
+                    while appended < 16, input.isReadyForMoreMediaData {
                         guard let sample = try track.nextSampleBuffer() else {
-                            track.input.markAsFinished()
+                            input.markAsFinished()
                             audioFinished[index] = true
                             break
                         }
-                        guard track.input.append(sample) else {
+                        guard input.append(sample) else {
                             throw ExportError.encodingFailed(writer.error?.localizedDescription ?? "an audio sample was rejected")
                         }
                         appended += 1

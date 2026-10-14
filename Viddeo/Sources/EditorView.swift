@@ -1,9 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// Plain controls for the implemented edit operations; processed output is reviewed after export.
+/// Processed preview plus plain controls for the implemented edit operations.
 struct EditorView: View {
     @Bindable var editor: EditorModel
     let presetID: String
+    /// The selected export preset's settings and the click-effect toggle, so the preview matches the export.
+    let settings: ExportSettings
+    let showsClickEffects: Bool
     @State private var trimStart = 0.0
     @State private var trimEnd = 0.0
     @State private var splitTime = 0.0
@@ -18,6 +22,7 @@ struct EditorView: View {
                 Button("Redo") { editor.redo() }.disabled(!editor.canRedo)
                 Button("Save Project") { editor.save(presetID: presetID) }
             }
+            EditorPreview(editor: editor, settings: settings, showsClickEffects: showsClickEffects)
             TabView {
                 timeline.tabItem { Text("Timeline") }
                 stage.tabItem { Text("Background") }
@@ -198,10 +203,53 @@ struct EditorView: View {
                 Text(editor.state.audio.clickSoundEffectVolume.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
             }
             .disabled(editor.state.audio.clickSoundEffect == nil)
+            Divider()
+            HStack {
+                Text("Background music").frame(width: 110, alignment: .leading)
+                Text(editor.state.audio.backgroundAudioFileName ?? "None").lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button(editor.state.audio.backgroundAudioFileName == nil ? "Choose…" : "Replace…") { chooseMusic() }
+                Button("Remove") { editor.removeBackgroundMusic() }
+                    .disabled(editor.state.audio.backgroundAudioFileName == nil)
+            }
+            HStack {
+                Text("Music volume").frame(width: 110, alignment: .leading)
+                Slider(value: Binding(get: { editor.state.audio.backgroundAudioVolume }, set: { value in
+                    editor.edit({ $0.audio.backgroundAudioVolume = value }, key: "music-volume")
+                }), in: 0...1)
+                Text(editor.state.audio.backgroundAudioVolume.formatted(.percent.precision(.fractionLength(0)))).frame(width: 45)
+                Toggle("Mute", isOn: Binding(get: { editor.state.audio.muteBackgroundAudio }, set: { muted in
+                    editor.edit { $0.audio.muteBackgroundAudio = muted }
+                }))
+            }
+            .disabled(editor.state.audio.backgroundAudioFileName == nil)
+            Divider()
+            Toggle("Mix everything into one audio track", isOn: Binding(get: { editor.state.audio.mixdownSingleTrack }, set: { on in
+                editor.edit { $0.audio.mixdownSingleTrack = on }
+            }))
+            Picker("Loudness", selection: Binding(get: { editor.state.audio.targetLoudnessLUFS }, set: { target in
+                editor.edit { $0.audio.targetLoudnessLUFS = target }
+            })) {
+                Text("Off").tag(Optional<Double>.none)
+                Text("−16 LUFS").tag(Optional(-16.0))
+                Text("−14 LUFS").tag(Optional(-14.0))
+            }
+            .disabled(!editor.state.audio.mixdownSingleTrack)
+            Text("Music starts at 0:00, loops to the edited length, fades out for 1 s and ignores trims. The single track is stereo, limited to \(editor.state.audio.limiterCeilingDB.formatted(.number.precision(.fractionLength(0...1)))) dB; MP4 only.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Applied to MP4 exports: cleanup replaces the exported microphone track, click sounds add a separate track. Cleanup is viddeo's own DSP, not Screen Studio's model.")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.padding(12)
+    }
+
+    private func chooseMusic() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose background music"
+        if panel.runModal() == .OK, let url = panel.url { editor.setBackgroundMusic(from: url) }
     }
 
     private var camera: some View {

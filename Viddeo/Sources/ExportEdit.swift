@@ -78,17 +78,21 @@ final class ExportFrameSource {
     private let asset: AVAsset
     private let track: AVAssetTrack
     private let timeline: TimelineModel?
+    private let seekable: Bool
     private var reader: SourceFrameReader?
     private var lastRequest = -Double.infinity
 
-    init(asset: AVAsset, duration: CMTime, timeline: TimelineModel?) async throws {
+    /// `seekable` forces the reseeking path even without a timeline, for the editor preview, which
+    /// scrubs backward; the export loops never need it.
+    init(asset: AVAsset, duration: CMTime, timeline: TimelineModel?, seekable: Bool = false) async throws {
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw OfflineExporter.ExportError.missingVideoTrack
         }
         self.asset = asset
         self.track = track
         self.timeline = timeline
-        if timeline == nil {
+        self.seekable = seekable || timeline != nil
+        if !self.seekable {
             reader = try SourceFrameReader(asset: asset, track: track,
                                            timeRange: CMTimeRange(start: .zero, duration: duration))
         }
@@ -96,7 +100,7 @@ final class ExportFrameSource {
 
     /// The latest decoded frame at or before `sourceTime` (or the first frame after it when none precedes it).
     func image(atSource sourceTime: Double) throws -> CIImage? {
-        guard timeline != nil else { return try reader?.image(at: sourceTime) }
+        guard seekable else { return try reader?.image(at: sourceTime) }
         if reader == nil || sourceTime < lastRequest - 1e-6 || sourceTime > lastRequest + Self.reseekDistance {
             try seek(to: sourceTime)
         }

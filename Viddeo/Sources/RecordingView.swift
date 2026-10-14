@@ -121,7 +121,8 @@ struct RecordingView: View {
 
             if let editor = viewModel.editor {
                 Divider()
-                EditorView(editor: editor, presetID: viewModel.selectedPresetID)
+                EditorView(editor: editor, presetID: viewModel.selectedPresetID,
+                           settings: viewModel.selectedPreset.settings, showsClickEffects: viewModel.showsClickEffects)
                     .disabled(viewModel.phase != .idle || editor.isWorking)
             }
         }

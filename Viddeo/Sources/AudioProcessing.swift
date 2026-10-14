@@ -25,11 +25,14 @@ struct AudioMixConfiguration: Codable, Sendable, Equatable {
     var clickSoundEffectVolume = 0.25
     var limiterCeilingDB = -1.0
     var targetLoudnessLUFS: Double? = nil
+    /// Export one stereo AAC track (every edited source summed, optionally loudness-normalized, then
+    /// limited) instead of one track per source. MP4 only.
+    var mixdownSingleTrack = false
 
     enum CodingKeys: String, CodingKey {
         case volume, muteMicrophone, muteSystemAudio, microphonePreset, backgroundAudioFileName,
              backgroundAudioVolume, muteBackgroundAudio, clickSoundEffect, clickSoundEffectVolume,
-             limiterCeilingDB, targetLoudnessLUFS
+             limiterCeilingDB, targetLoudnessLUFS, mixdownSingleTrack
     }
 
     func validate() throws {
@@ -52,12 +55,16 @@ struct AudioMixConfiguration: Codable, Sendable, Equatable {
             !name.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
 
-    /// True when exporting with this configuration would not change the recorded audio: the wired
-    /// settings (master volume, mutes, microphone preset, click sounds) are all at their no-op values.
-    /// Background music, the limiter and loudness target are not applied by the exporter yet.
+    /// True when exporting with this configuration would not change the recorded audio: master volume,
+    /// mutes, microphone preset, click sounds, background music (unmuted) and the mixdown are all at
+    /// their no-op values. The limiter and loudness target only act inside the mixdown.
     var isExportNeutral: Bool {
         volume == 1 && !muteMicrophone && !muteSystemAudio && microphonePreset == .off && clickSoundEffect == nil
+            && !hasActiveBackgroundMusic && !mixdownSingleTrack
     }
+
+    /// Music is chosen and not muted.
+    var hasActiveBackgroundMusic: Bool { backgroundAudioFileName != nil && !muteBackgroundAudio }
 
     /// viddeo's starting point for a project without `audio-config.json`: the observed defaults,
     /// except that microphone cleanup is off (a design choice — it is lossy and opt-in).
@@ -103,12 +110,14 @@ extension AudioMixConfiguration {
         clickSoundEffectVolume = try container.decodeIfPresent(Double.self, forKey: .clickSoundEffectVolume) ?? clickSoundEffectVolume
         limiterCeilingDB = try container.decodeIfPresent(Double.self, forKey: .limiterCeilingDB) ?? limiterCeilingDB
         targetLoudnessLUFS = try container.decodeIfPresent(Double.self, forKey: .targetLoudnessLUFS)
+        mixdownSingleTrack = try container.decodeIfPresent(Bool.self, forKey: .mixdownSingleTrack) ?? false
     }
 }
 
 enum AudioProcessingError: LocalizedError {
     case invalidConfiguration
     case invalidBackgroundAudioFileName
+    case missingBackgroundAudio(String)
     case missingAudioTrack(String)
     case unreadableAudio(String)
     case unwritableAudio(String)
@@ -117,6 +126,7 @@ enum AudioProcessingError: LocalizedError {
         switch self {
         case .invalidConfiguration: "Audio settings contain invalid volume, limiter or loudness values."
         case .invalidBackgroundAudioFileName: "The background audio must be a file name inside the session folder."
+        case .missingBackgroundAudio(let name): "The background music file \"\(name)\" was not found in the session folder."
         case .missingAudioTrack(let name): "The audio track \(name) was not found."
         case .unreadableAudio(let detail): "Audio could not be read: \(detail)"
         case .unwritableAudio(let detail): "Audio could not be written: \(detail)"
@@ -665,11 +675,52 @@ enum AudioMixer {
         let frameCount = max(0, Int((min(12 * 60 * 60, end.isFinite ? end : 0) * AudioFileIO.sampleRate).rounded()))
         guard frameCount > 0 else { throw AudioProcessingError.unwritableAudio("The mix is empty.") }
         var mix = sum(sources, frameCount: frameCount)
+        finalize(&mix, limiterCeilingDB: limiterCeilingDB, targetLoudnessLUFS: targetLoudnessLUFS)
+        try AudioFileIO.write(mix, to: outputURL)
+    }
+
+    /// Optional integrated-loudness normalization (at most +24 dB), then the brick-wall limiter.
+    static func finalize(_ mix: inout PCMAudio, limiterCeilingDB: Double, targetLoudnessLUFS: Double?) {
         if let target = targetLoudnessLUFS, target.isFinite, let measured = LoudnessMeter.integratedLoudness(mix) {
             let gain = Float(pow(10, min(24, target - measured) / 20))
             for channel in mix.channels.indices { vDSP.multiply(gain, mix.channels[channel], result: &mix.channels[channel]) }
         }
         Limiter.process(&mix.channels, ceilingDB: limiterCeilingDB, sampleRate: mix.sampleRate)
-        try AudioFileIO.write(mix, to: outputURL)
+    }
+}
+
+/// Background music in playback time (a viddeo design choice; Screen Studio only exposes the file,
+/// volume and mute): it starts at playback time 0, loops to fill the edited duration, ignores
+/// trims and speed ramps (it follows playback time, not source time) and fades out linearly over
+/// the last second. Each loop seam gets a 5 ms fade-out/fade-in so the wrap never clicks.
+enum BackgroundMusic {
+    static let fadeOutSeconds = 1.0
+    static let seamSeconds = 0.005
+
+    /// `source` tiled to `frameCount` frames with `gain` applied. Empty when the source is empty.
+    static func render(_ source: PCMAudio, frameCount: Int, gain: Float, fadeOutSeconds: Double = fadeOutSeconds) -> PCMAudio {
+        let length = source.frameCount
+        guard length > 0, frameCount > 0, !source.channels.isEmpty else {
+            return PCMAudio(sampleRate: source.sampleRate, channels: source.channels.map { _ in [] })
+        }
+        let seam = min(Int(seamSeconds * source.sampleRate), length / 2)
+        let fade = min(frameCount, max(0, Int(fadeOutSeconds * source.sampleRate)))
+        let channels = source.channels.map { input -> [Float] in
+            var output = [Float](repeating: 0, count: frameCount)
+            for index in 0..<frameCount {
+                let position = index % length
+                var value = input[position] * gain
+                if seam > 0 {
+                    // Seam fades only where another loop follows or precedes this one.
+                    if index >= length, position < seam { value *= Float(position) / Float(seam) }
+                    let remaining = length - position
+                    if remaining <= seam, index + remaining < frameCount { value *= Float(remaining) / Float(seam) }
+                }
+                if fade > 0, index >= frameCount - fade { value *= Float(frameCount - index) / Float(fade) }
+                output[index] = value
+            }
+            return output
+        }
+        return PCMAudio(sampleRate: source.sampleRate, channels: channels)
     }
 }

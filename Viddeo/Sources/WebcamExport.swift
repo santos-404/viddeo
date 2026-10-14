@@ -51,13 +51,13 @@ final class WebcamFrameSource {
     private let frames: ExportFrameSource
     private let offset: Double
 
-    init(plan: WebcamExportPlan, timeline: TimelineModel?) async throws {
+    init(plan: WebcamExportPlan, timeline: TimelineModel?, seekable: Bool = false) async throws {
         let asset = AVURLAsset(url: plan.cameraURL)
         let duration = try await asset.load(.duration)
         guard duration.isValid, duration.isNumeric, duration > .zero else {
             throw OfflineExporter.ExportError.invalidSession("the recorded camera video has no frames")
         }
-        frames = try await ExportFrameSource(asset: asset, duration: duration, timeline: timeline)
+        frames = try await ExportFrameSource(asset: asset, duration: duration, timeline: timeline, seekable: seekable)
         offset = plan.offset
     }
 

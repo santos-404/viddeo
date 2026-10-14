@@ -19,7 +19,12 @@ final class ExportAudioTrack {
     /// `clicks` is viddeo's synthesized click-sound track; segment volumes do not apply to it.
     enum Role: Sendable { case microphone, system, clicks, unknown }
 
-    let input: AVAssetWriterInput
+    /// The AAC writer input; nil when the track was created without a writer to be consumed as PCM
+    /// (`renderPCM()`), as the single-track mixdown does.
+    let input: AVAssetWriterInput?
+    /// Format of the PCM this track produces (the AAC track's format when it has a writer).
+    let sampleRate: Double
+    let channels: Int
     private let reader: AVAssetReader?
     private let output: AVAssetReaderOutput?
     private let edited: Edited?
@@ -39,9 +44,12 @@ final class ExportAudioTrack {
 
     /// Pass-through: decodes `track` over `timeRange` exactly as before edits existed. A `gain` other
     /// than 1 (master volume or a mute) goes through an audio mix, which is the only change.
+    /// A non-nil `sampleRate` forces that rate (the reader resamples), which the mixdown uses to get 48 kHz.
     init(asset: AVAsset, track: AVAssetTrack, timeRange: CMTimeRange, gain: Float = 1,
-         writer: AVAssetWriter) async throws {
-        let (sampleRate, channels) = try await Self.format(of: track)
+         writer: AVAssetWriter?, sampleRate forcedRate: Double? = nil) async throws {
+        let (sampleRate, channels) = try await Self.format(of: track, forcedRate: forcedRate)
+        self.sampleRate = sampleRate
+        self.channels = channels
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = timeRange
         let output: AVAssetReaderOutput
@@ -67,8 +75,10 @@ final class ExportAudioTrack {
     /// Edited: `track` assembled per `plan`, gain chosen by `role` and multiplied by `gain` (master
     /// volume or a mute), `playbackDuration` long.
     init(track: AVAssetTrack, role: Role, plan: [EditPlanItem], playbackDuration: Double, gain extraGain: Float = 1,
-         writer: AVAssetWriter) async throws {
-        let (sampleRate, channels) = try await Self.format(of: track)
+         writer: AVAssetWriter?, sampleRate forcedRate: Double? = nil) async throws {
+        let (sampleRate, channels) = try await Self.format(of: track, forcedRate: forcedRate)
+        self.sampleRate = sampleRate
+        self.channels = channels
         let trackRange = try await track.load(.timeRange)
         let composition = AVMutableComposition()
         guard let target = composition.addMutableTrack(withMediaType: .audio,
@@ -147,6 +157,29 @@ final class ExportAudioTrack {
         if let reader, !reader.startReading() {
             throw OfflineExporter.ExportError.encodingFailed(reader.error?.localizedDescription ?? "audio reading did not start")
         }
+    }
+
+    /// Drains the whole track as float PCM in playback time (the same samples, gains and silence the
+    /// AAC path would encode). Call after `start()`; intended for tracks created without a writer.
+    func renderPCM() throws -> PCMAudio {
+        var samples = [[Float]](repeating: [], count: channels)
+        while let sample = try nextSampleBuffer() {
+            try Task.checkCancellation()
+            guard let block = CMSampleBufferGetDataBuffer(sample) else { continue }
+            let length = CMBlockBufferGetDataLength(block) / 2 * 2
+            var data = [Int16](repeating: 0, count: length / 2)
+            guard length == 0 || data.withUnsafeMutableBytes({
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: $0.baseAddress!)
+            }) == kCMBlockBufferNoErr else {
+                throw OfflineExporter.ExportError.encodingFailed("could not copy decoded audio")
+            }
+            let frames = data.count / channels
+            for channel in 0..<channels {
+                samples[channel].reserveCapacity(samples[channel].count + frames)
+                for frame in 0..<frames { samples[channel].append(Float(data[frame * channels + channel]) / 32_768) }
+            }
+        }
+        return PCMAudio(sampleRate: sampleRate, channels: samples)
     }
 
     func cancel() {
@@ -254,11 +287,11 @@ final class ExportAudioTrack {
         return sample
     }
 
-    private static func format(of track: AVAssetTrack) async throws -> (sampleRate: Double, channels: Int) {
+    private static func format(of track: AVAssetTrack, forcedRate: Double? = nil) async throws -> (sampleRate: Double, channels: Int) {
         let descriptions = try await track.load(.formatDescriptions)
         let format = descriptions.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
         let sourceRate = format?.mSampleRate ?? 48_000
-        let sampleRate = [48_000.0, 44_100, 32_000, 24_000, 22_050, 16_000].contains(sourceRate) ? sourceRate : 48_000
+        let sampleRate = forcedRate ?? ([48_000.0, 44_100, 32_000, 24_000, 22_050, 16_000].contains(sourceRate) ? sourceRate : 48_000)
         return (sampleRate, min(2, max(1, Int(format?.mChannelsPerFrame ?? 2))))
     }
 
@@ -283,8 +316,15 @@ final class ExportAudioTrack {
         )
     }
 
-    private static func addInput(to writer: AVAssetWriter, reader: AVAssetReader?, output: AVAssetReaderOutput?,
-                                 sampleRate: Double, channels: Int, trackID: CMPersistentTrackID) throws -> AVAssetWriterInput {
+    private static func addInput(to writer: AVAssetWriter?, reader: AVAssetReader?, output: AVAssetReaderOutput?,
+                                 sampleRate: Double, channels: Int, trackID: CMPersistentTrackID) throws -> AVAssetWriterInput? {
+        guard let writer else {
+            guard reader.map({ reader in output.map { reader.canAdd($0) } ?? false }) ?? true else {
+                throw OfflineExporter.ExportError.unsupportedOutput("cannot decode audio track \(trackID)")
+            }
+            if let reader, let output { reader.add(output) }
+            return nil
+        }
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: sampleRate,
@@ -363,6 +403,25 @@ enum ExportAudioPreparation {
                                named: "click-sounds", directory: directory)
     }
 
+    /// The background music as 48 kHz PCM exactly `duration` (playback time) long with master volume,
+    /// music volume, looping and fade-out applied (`BackgroundMusic`), or nil when there is none to
+    /// play (no file, muted, or silent). A missing file is an error naming it.
+    static func backgroundMusic(mix: AudioMixConfiguration, sessionDirectory: URL, duration: Double) async throws -> PCMAudio? {
+        guard mix.hasActiveBackgroundMusic, let name = mix.backgroundAudioFileName else { return nil }
+        guard let url = mix.backgroundAudioURL(in: sessionDirectory) else {
+            throw AudioProcessingError.invalidBackgroundAudioFileName
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw AudioProcessingError.missingBackgroundAudio(name)
+        }
+        let gain = AudioMixer.effectiveGain(MixTrack(url: url, gain: 1, startOffset: 0, kind: .backgroundAudio), plan: mix)
+        guard gain > 0 else { return nil }
+        let source = try await AudioFileIO.read(url)
+        let frames = Int((duration * AudioFileIO.sampleRate).rounded())
+        let music = BackgroundMusic.render(source, frameCount: frames, gain: Float(gain))
+        return music.frameCount > 0 ? music : nil
+    }
+
     /// The master volume and mute for one role. Segment volumes are applied separately, per segment.
     static func gain(for role: ExportAudioTrack.Role, mix: AudioMixConfiguration?) -> Float {
         guard let mix else { return 1 }
@@ -375,7 +434,7 @@ enum ExportAudioPreparation {
         return gain.isFinite ? Float(max(0, gain)) : 1
     }
 
-    private static func write(_ audio: PCMAudio, named name: String, directory: URL) async throws -> Source? {
+    static func write(_ audio: PCMAudio, named name: String, directory: URL) async throws -> Source? {
         let url = directory.appendingPathComponent("\(name).caf", isDirectory: false)
         try AudioFileIO.write(audio, to: url)
         let asset = AVURLAsset(url: url)

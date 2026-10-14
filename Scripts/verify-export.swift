@@ -197,7 +197,7 @@ struct VerifyExport {
         try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
 
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding.")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); rendered cursor, typing and segment hiding.")
     }
 
     @MainActor
@@ -793,6 +793,185 @@ struct VerifyExport {
                 throw VerificationError.failed("\(name): microphone changed to \(sourceTone) (baseline \(baseMic))")
             }
         }
+
+        try await verifyBackgroundMusicAndMixdown(
+            directory: directory, duration: duration, neutral: neutral, baseSystem: baseSystem, baseMic: baseMic,
+            export: export, measure: measure)
+    }
+
+    /// Music fixture (mono 48 kHz, 1.5 s): 1000 Hz for 0.75 s, then 1500 Hz, so loops are visible as a
+    /// repeating frequency pattern. System 440 Hz / microphone 880 Hz come from the session fixture.
+    @MainActor
+    private static func verifyBackgroundMusicAndMixdown(
+        directory: URL, duration: Double, neutral: AudioMixConfiguration, baseSystem: ToneMeasure, baseMic: ToneMeasure,
+        export: (String, ExportEdit?) async throws -> (asset: AVURLAsset, count: Int),
+        measure: ((asset: AVURLAsset, count: Int), Int, Double, Double) async throws -> ToneMeasure
+    ) async throws {
+        func fail(_ message: String) -> VerificationError { VerificationError.failed(message) }
+        let musicName = "music-fixture.wav"
+        try writeToneWAV(to: directory.appendingPathComponent(musicName), duration: 1.5) { $0 < 0.75 ? 1000 : 1500 }
+
+        // Neutral-config rules and decoding.
+        var music = neutral
+        music.backgroundAudioFileName = musicName
+        var mutedMusic = music
+        mutedMusic.muteBackgroundAudio = true
+        var mixdownOnly = neutral
+        mixdownOnly.mixdownSingleTrack = true
+        guard !music.isExportNeutral, ExportEdit(audio: music).audio != nil, mutedMusic.isExportNeutral,
+              !mixdownOnly.isExportNeutral, ExportEdit(audio: mutedMusic).audio == nil else {
+            throw fail("neutral-configuration rules for music / mixdown are wrong")
+        }
+        let decoded = try JSONDecoder().decode(AudioMixConfiguration.self, from: Data("{}".utf8))
+        guard decoded.mixdownSingleTrack == false, decoded.backgroundAudioVolume == 0.05 else {
+            throw fail("a missing mixdownSingleTrack key should decode to false")
+        }
+
+        // Missing music file: a clear error naming it.
+        var missing = neutral
+        missing.backgroundAudioFileName = "no-such-music.mp3"
+        do {
+            _ = try await export("audio-music-missing", ExportEdit(audio: missing))
+            throw fail("an export with missing music succeeded")
+        } catch let error as AudioProcessingError {
+            guard error.localizedDescription.contains("no-such-music.mp3") else { throw fail("missing-music error does not name the file: \(error)") }
+        }
+
+        // Music on an edited (trimmed) timeline: playback = source 2…6 s = 4 s. Music starts at playback 0
+        // (not source 2), loops (1.5 s fixture), keeps its level and fades out over the last second.
+        var trimmed = TimelineModel(sourceDuration: duration)
+        let tail = try trimmed.split(atSource: 6)
+        try trimmed.delete(segmentID: tail)
+        let head = try trimmed.split(atSource: 2)
+        _ = head
+        let first = trimmed.segments[0].id
+        try trimmed.delete(segmentID: first)
+        let playback = trimmed.playbackDuration
+        guard abs(playback - 4) < 1e-6 else { throw fail("trimmed fixture should play 4 s, got \(playback)") }
+        var halfMusic = music
+        halfMusic.backgroundAudioVolume = 0.5
+        for (name, timeline, length) in [("audio-music-edited", trimmed as TimelineModel?, playback), ("audio-music-plain", nil, duration)] {
+            let exported = try await export(name, ExportEdit(timeline: timeline, audio: halfMusic))
+            guard exported.count == 3 else { throw fail("\(name) has \(exported.count) audio tracks, expected two sources plus music") }
+            let range = try await exported.asset.loadTracks(withMediaType: .audio)[2].load(.timeRange)
+            guard abs(range.start.seconds) < 0.05, abs(range.end.seconds - length) < 0.15 else {
+                throw fail("\(name): music spans \(range.start.seconds)…\(range.end.seconds)s of \(length)s")
+            }
+            // Loop pattern: 1000 Hz at 0.1–0.6, 1500 at 0.85–1.4, 1000 again at 1.6–2.1, 1500 at 2.35–2.9.
+            let expected = [(0.1, 0.6, 1000.0), (0.85, 1.4, 1500), (1.6, 2.1, 1000), (2.35, 2.9, 1500)]
+            var levels: [Double] = []
+            for (from, to, frequency) in expected {
+                let measured = try await measure(exported, 2, from, to)
+                guard abs(measured.frequency - frequency) < 60 else { throw fail("\(name): music at \(from)s is \(measured), expected \(frequency) Hz") }
+                levels.append(measured.rms)
+            }
+            // Level = master 1 × volume 0.5 of the same-amplitude microphone fixture tone.
+            guard levels.allSatisfy({ abs($0 / baseMic.rms - 0.5) < 0.07 }) else {
+                throw fail("\(name): music levels \(levels) vs 0.5 × baseline \(baseMic.rms)")
+            }
+            // Fade: full level before the last second, ramping to silence at the end.
+            let before = try await measure(exported, 2, length - 1.4, length - 1.1)
+            let middle = try await measure(exported, 2, length - 0.6, length - 0.4)
+            let end = try await measure(exported, 2, length - 0.1, length - 0.02)
+            guard abs(before.rms / levels[0] - 1) < 0.1, abs(middle.rms / levels[0] - 0.5) < 0.12, end.rms < levels[0] * 0.2 else {
+                throw fail("\(name): fade-out levels \(before), \(middle), \(end) vs full \(levels[0])")
+            }
+            // The system and microphone tracks are untouched.
+            let mic = try await measure(exported, 1, 1, 3)
+            guard abs(mic.rms - baseMic.rms) < baseMic.rms * 0.1 else { throw fail("\(name): microphone changed to \(mic)") }
+        }
+
+        // Mixdown: exactly one stereo track holding the 440 and 880 Hz tones (and the music).
+        var mixdown = neutral
+        mixdown.mixdownSingleTrack = true
+        for (name, timeline) in [("audio-mixdown-plain", nil as TimelineModel?), ("audio-mixdown-edited", trimmed)] {
+            let exported = try await export(name, ExportEdit(timeline: timeline, audio: mixdown))
+            guard exported.count == 1 else { throw fail("\(name) has \(exported.count) audio tracks, expected one") }
+            let mixed = try await decodeStereo(exported.asset)
+            let length = timeline?.playbackDuration ?? duration
+            let channels = mixed.channels.count
+            guard channels == 2, abs(mixed.duration - length) < 0.15 else {
+                throw fail("\(name): mixdown has \(channels) channels and lasts \(mixed.duration)s of \(length)s")
+            }
+            let low = goertzel(mixed.channels[0], 440, from: 1, to: 3), high = goertzel(mixed.channels[0], 880, from: 1, to: 3)
+            let other = goertzel(mixed.channels[0], 660, from: 1, to: 3)
+            // Each tone has amplitude 10000/32768; the Goertzel magnitude of a unit-gain tone is that amplitude.
+            guard abs(low - 0.305) < 0.04, abs(high - 0.305) < 0.04, other < 0.02 else {
+                throw fail("\(name): 440 Hz \(low), 880 Hz \(high), 660 Hz \(other) (expected 0.305, 0.305, ~0)")
+            }
+        }
+        // Volumes and mutes in the mixdown: master 0.5 halves both, muting the system leaves only 880 Hz.
+        var halfMix = mixdown
+        halfMix.volume = 0.5
+        halfMix.muteSystemAudio = true
+        do {
+            let exported = try await export("audio-mixdown-mute", ExportEdit(audio: halfMix))
+            let mixed = try await decodeStereo(exported.asset)
+            let low = goertzel(mixed.channels[0], 440, from: 1, to: 3), high = goertzel(mixed.channels[0], 880, from: 1, to: 3)
+            guard exported.count == 1, low < 0.01, abs(high - 0.1525) < 0.03 else {
+                throw fail("mixdown mute/volume: 440 Hz \(low) (want 0), 880 Hz \(high) (want 0.1525)")
+            }
+        }
+        // Music joins the mixdown (volume 1 so it is measurable): 1000 Hz first, and it follows playback time.
+        var withMusic = mixdown
+        withMusic.backgroundAudioFileName = musicName
+        withMusic.backgroundAudioVolume = 0.5
+        do {
+            let exported = try await export("audio-mixdown-music", ExportEdit(timeline: trimmed, audio: withMusic))
+            guard exported.count == 1 else { throw fail("mixdown with music has \(exported.count) tracks") }
+            let mixed = try await decodeStereo(exported.asset)
+            let early = goertzel(mixed.channels[0], 1000, from: 0.1, to: 0.6), late = goertzel(mixed.channels[0], 1500, from: 0.85, to: 1.4)
+            let wrong = goertzel(mixed.channels[0], 1500, from: 0.1, to: 0.6)
+            let tone = goertzel(mixed.channels[0], 880, from: 0.1, to: 0.6)
+            guard abs(early - 0.1525) < 0.03, abs(late - 0.1525) < 0.03, wrong < 0.02, abs(tone - 0.305) < 0.04 else {
+                throw fail("mixdown with music: 1000 Hz \(early), 1500 Hz \(late), 1500 Hz@0 \(wrong), 880 Hz \(tone)")
+            }
+        }
+        // Limiter: master 2 would sum above full scale; the peak stays at the ceiling (AAC overshoot < 0.5 dB).
+        var loud = mixdown
+        loud.volume = 2
+        do {
+            let exported = try await export("audio-mixdown-limited", ExportEdit(audio: loud))
+            let mixed = try await decodeStereo(exported.asset)
+            let peak = mixed.channels.flatMap { $0 }.map { abs($0) }.max() ?? 0
+            let ceiling = Float(pow(10, loud.limiterCeilingDB / 20))
+            print(String(format: "mixdown limiter: peak %.4f, ceiling %.4f", peak, ceiling))
+            guard peak <= ceiling * 1.06, peak > ceiling * 0.7 else {
+                throw fail("limited mixdown peak \(peak) vs ceiling \(ceiling)")
+            }
+        }
+        // Loudness: -16 and -14 LUFS are reached within 1 LU.
+        for target in [-16.0, -14.0] {
+            var normalized = mixdown
+            normalized.targetLoudnessLUFS = target
+            let exported = try await export("audio-mixdown-lufs\(Int(-target))", ExportEdit(audio: normalized))
+            let mixed = try await decodeStereo(exported.asset)
+            guard let measured = LoudnessMeter.integratedLoudness(mixed), abs(measured - target) <= 1 else {
+                throw fail("mixdown loudness \(LoudnessMeter.integratedLoudness(mixed).map { String($0) } ?? "nil") LUFS, wanted \(target)")
+            }
+            let peak = mixed.channels.flatMap { $0 }.map { abs($0) }.max() ?? 0
+            print(String(format: "mixdown target %.0f LUFS: measured %.2f LUFS, peak %.3f", target, measured, peak))
+            guard peak <= Float(pow(10, normalized.limiterCeilingDB / 20)) * 1.06 else { throw fail("normalized mixdown peak \(peak)") }
+        }
+        // GIF ignores audio settings entirely (no audio track, export still succeeds is covered elsewhere).
+    }
+
+    private static func decodeStereo(_ asset: AVURLAsset) async throws -> PCMAudio {
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { throw VerificationError.failed("no audio track") }
+        return try await AudioFileIO.decode(asset: asset, track: track)
+    }
+
+    /// Single-bin DFT magnitude (amplitude of a sinusoid at `frequency`) over `from`…`to` seconds at 48 kHz.
+    private static func goertzel(_ samples: [Float], _ frequency: Double, from: Double, to: Double) -> Double {
+        let lower = min(samples.count, Int(from * 48_000)), upper = min(samples.count, Int(to * 48_000))
+        guard upper - lower > 100 else { return 0 }
+        var real = 0.0, imaginary = 0.0
+        for index in lower..<upper {
+            let angle = 2 * Double.pi * frequency * Double(index) / 48_000
+            real += Double(samples[index]) * cos(angle)
+            imaginary += Double(samples[index]) * sin(angle)
+        }
+        return 2 * (real * real + imaginary * imaginary).squareRoot() / Double(upper - lower)
     }
 
     // MARK: Camera overlay

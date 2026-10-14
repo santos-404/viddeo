@@ -119,6 +119,39 @@ final class EditorModel {
         } catch { self.error = error.localizedDescription; return false }
     }
 
+    /// Copies `url` into the session folder under a safe single-component name (never overwriting
+    /// another file) and selects it as background music, as one undoable edit. The copy stays when the
+    /// edit is undone, so redo and saved projects keep working.
+    func setBackgroundMusic(from url: URL) {
+        guard !isWorking else { return }
+        do {
+            let manager = FileManager.default
+            var name = url.lastPathComponent.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: "\\", with: "-")
+            while name.hasPrefix(".") || name.hasPrefix("~") { name.removeFirst() }
+            name = String(name.unicodeScalars.filter { $0.properties.generalCategory != .control })
+            if name.isEmpty { name = "music" }
+            if !name.lowercased().hasPrefix("music-") { name = "music-" + name }
+            guard AudioMixConfiguration.isSafeFileName(name) else { throw AudioProcessingError.invalidBackgroundAudioFileName }
+            var destination = directory.appendingPathComponent(name, isDirectory: false)
+            if destination.standardizedFileURL != url.standardizedFileURL {
+                var counter = 2
+                let base = destination.deletingPathExtension().lastPathComponent, ext = destination.pathExtension
+                while manager.fileExists(atPath: destination.path) {
+                    destination = directory.appendingPathComponent(ext.isEmpty ? "\(base)-\(counter)" : "\(base)-\(counter).\(ext)", isDirectory: false)
+                    counter += 1
+                }
+                try manager.copyItem(at: url, to: destination)
+            }
+            let stored = destination.lastPathComponent
+            edit { $0.audio.backgroundAudioFileName = stored }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func removeBackgroundMusic() {
+        edit { $0.audio.backgroundAudioFileName = nil }
+    }
+
     func generateCaptions() {
         guard !isWorking else { return }
         isWorking = true
