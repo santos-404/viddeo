@@ -446,6 +446,114 @@ enum ExportAudioPreparation {
         return music.frameCount > 0 ? music : nil
     }
 
+    /// The per-source audio an export builds for `mix`: one `ExportAudioTrack` per source audio track
+    /// (microphone cleaned per the preset), plus the click-sound track, and the background music.
+    /// `writer` non-nil gives each track its AAC input; nil (with `mixdown`) makes PCM-only tracks at
+    /// 48 kHz. `outputDuration` is the playback duration. Derived audio is written under `scratch`.
+    /// Missing background music throws before any track is created.
+    static func makeTracks(
+        asset: AVURLAsset, sourceDuration: CMTime, outputDuration: CMTime, timeline: TimelineModel?,
+        roles: [ExportAudioTrack.Role]?, mix: AudioMixConfiguration?, events: [CursorEvent],
+        sessionDirectory: URL, scratch: URL, writer: AVAssetWriter?, mixdown: Bool
+    ) async throws -> (tracks: [ExportAudioTrack], music: PCMAudio?) {
+        let timeRange = CMTimeRange(start: .zero, duration: sourceDuration)
+        var music: PCMAudio?
+        if let mix {
+            music = try await backgroundMusic(mix: mix, sessionDirectory: sessionDirectory,
+                                              duration: outputDuration.seconds)
+        }
+        var tracks: [ExportAudioTrack] = []
+        func addAudio(asset trackAsset: AVAsset, track: AVAssetTrack, role: ExportAudioTrack.Role) async throws {
+            let gain = Self.gain(for: role, mix: mix)
+            let target: AVAssetWriter? = mixdown ? nil : writer
+            let rate: Double? = mixdown ? AudioFileIO.sampleRate : nil
+            if let timeline {
+                tracks.append(try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
+                                                         playbackDuration: outputDuration.seconds, gain: gain,
+                                                         writer: target, sampleRate: rate))
+            } else {
+                tracks.append(try await ExportAudioTrack(asset: trackAsset, track: track, timeRange: timeRange,
+                                                         gain: gain, writer: target, sampleRate: rate))
+            }
+        }
+        for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
+            let role = roles.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? .unknown
+            if let mix, role == .microphone,
+               let cleaned = try await cleanedMicrophone(
+                   asset: asset, track: track, preset: mix.microphonePreset,
+                   limiterCeilingDB: mix.limiterCeilingDB, directory: scratch) {
+                try await addAudio(asset: cleaned.asset, track: cleaned.track, role: role)
+            } else {
+                try await addAudio(asset: asset, track: track, role: role)
+            }
+        }
+        if let mix, let set = mix.clickSoundEffect,
+           let clicks = try await clickSounds(
+               events: events, set: set, volume: mix.clickSoundEffectVolume,
+               duration: sourceDuration.seconds, directory: scratch) {
+            try await addAudio(asset: clicks.asset, track: clicks.track, role: .clicks)
+        }
+        return (tracks, music)
+    }
+
+    /// Sums PCM-only `sources` (from `makeTracks` with `mixdown`) and `music` onto one 48 kHz stereo
+    /// timeline of `outputDuration`, in playback time. `finalize` adds the optional loudness target and
+    /// the limiter (the export's single-track mixdown). Nil when nothing has any audio. Cancels the
+    /// sources when decoding fails.
+    static func sumSources(_ sources: [ExportAudioTrack], music: PCMAudio?, outputDuration: Double,
+                           mix: AudioMixConfiguration?, finalize: Bool, scratch: URL) throws -> PCMAudio? {
+        let frameCount = Int((outputDuration * AudioFileIO.sampleRate).rounded())
+        var summed: [(audio: PCMAudio, track: MixTrack)] = []
+        do {
+            for source in sources {
+                try source.start()
+                summed.append((try source.renderPCM(), MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .systemAudio)))
+            }
+        } catch {
+            for source in sources { source.cancel() }
+            throw error
+        }
+        if let music { summed.append((music, MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .backgroundAudio))) }
+        guard summed.contains(where: { $0.audio.frameCount > 0 }), frameCount > 0 else { return nil }
+        var mixed = AudioMixer.sum(summed, frameCount: frameCount)
+        summed = []
+        if finalize, let mix {
+            AudioMixer.finalize(&mixed, limiterCeilingDB: mix.limiterCeilingDB, targetLoudnessLUFS: mix.targetLoudnessLUFS)
+        }
+        return mixed
+    }
+
+    /// The audio the editor preview plays: every source of the export for `edit` summed to one 48 kHz
+    /// stereo PCM in playback time, `outputDuration` long (the same duration, edit plan, speed ramps,
+    /// per-segment gains, cleanup, master volume/mutes, clicks and music as the exported MP4). The
+    /// export's single-track mixdown also gets its loudness target and limiter here; otherwise the
+    /// sources are simply summed, as a player sums the export's separate tracks. Nil when the
+    /// recording has no audio and the mix adds none.
+    static func previewMix(session: RecordingSession, directory: URL, settings: ExportSettings,
+                           edit: ExportEdit?) async throws -> PCMAudio? {
+        let (_, sessionDirectory, sourceURL) = try OfflineExporter.resolveSource(
+            session: session, directory: directory, destination: nil, settings: settings)
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceDuration = try await asset.load(.duration)
+        let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? sourceDuration
+        let mix = edit?.audio
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        if audioTracks.isEmpty, mix?.clickSoundEffect == nil, mix?.hasActiveBackgroundMusic != true { return nil }
+        let roles = edit?.timeline == nil && mix == nil ? nil
+            : try await ExportAudioTrack.roles(of: audioTracks, session: session)
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("viddeo-preview-audio-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let (tracks, music) = try await makeTracks(
+            asset: asset, sourceDuration: sourceDuration, outputDuration: outputDuration, timeline: edit?.timeline,
+            roles: roles, mix: mix, events: session.events, sessionDirectory: sessionDirectory, scratch: scratch,
+            writer: nil, mixdown: true)
+        defer { for track in tracks { track.cancel() } }
+        return try sumSources(tracks, music: music, outputDuration: outputDuration.seconds, mix: mix,
+                              finalize: mix?.mixdownSingleTrack == true, scratch: scratch)
+    }
+
     /// The master volume and mute for one role. Segment volumes are applied separately, per segment.
     static func gain(for role: ExportAudioTrack.Role, mix: AudioMixConfiguration?) -> Float {
         guard let mix else { return 1 }

@@ -301,7 +301,6 @@ final class OfflineExporter {
         settings: ExportSettings, progress: (@Sendable (Double) -> Void)?
     ) async throws {
         let asset = AVURLAsset(url: source)
-        let timeRange = CMTimeRange(start: .zero, duration: sourceDuration)
         let frames = try await ExportFrameSource(asset: asset, duration: sourceDuration, timeline: renderer.edit)
         var cameraFrames: WebcamFrameSource?
         if let plan = renderer.webcam { cameraFrames = try await WebcamFrameSource(plan: plan, timeline: renderer.edit) }
@@ -352,74 +351,24 @@ final class OfflineExporter {
         defer { try? FileManager.default.removeItem(at: scratch) }
         if mix != nil { try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true) }
 
-        // Missing music fails before anything is encoded.
-        var music: PCMAudio?
-        if let mix {
-            music = try await ExportAudioPreparation.backgroundMusic(mix: mix, sessionDirectory: sessionDirectory,
-                                                                     duration: duration.seconds)
-        }
         let mixdown = mix?.mixdownSingleTrack == true
 
         // Separate tracks go to the writer; mixdown sources (no writer) are rendered to PCM and summed.
-        var audio: [ExportAudioTrack] = []
-        var mixSources: [ExportAudioTrack] = []
-        func addAudio(asset trackAsset: AVAsset, track: AVAssetTrack, role: ExportAudioTrack.Role) async throws {
-            let gain = ExportAudioPreparation.gain(for: role, mix: mix)
-            let target: AVAssetWriter? = mixdown ? nil : writer
-            let rate: Double? = mixdown ? AudioFileIO.sampleRate : nil
-            let exportTrack: ExportAudioTrack
-            if let timeline = renderer.edit {
-                exportTrack = try await ExportAudioTrack(track: track, role: role, plan: timeline.editPlan,
-                                                         playbackDuration: duration.seconds, gain: gain,
-                                                         writer: target, sampleRate: rate)
-            } else {
-                exportTrack = try await ExportAudioTrack(asset: trackAsset, track: track, timeRange: timeRange,
-                                                         gain: gain, writer: target, sampleRate: rate)
-            }
-            if mixdown { mixSources.append(exportTrack) } else { audio.append(exportTrack) }
-        }
-
-        for (index, track) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
-            let role = audioRoles.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? .unknown
-            if let mix, role == .microphone,
-               let cleaned = try await ExportAudioPreparation.cleanedMicrophone(
-                   asset: asset, track: track, preset: mix.microphonePreset,
-                   limiterCeilingDB: mix.limiterCeilingDB, directory: scratch) {
-                try await addAudio(asset: cleaned.asset, track: cleaned.track, role: role)
-            } else {
-                try await addAudio(asset: asset, track: track, role: role)
-            }
-        }
-        if let mix, let set = mix.clickSoundEffect,
-           let clicks = try await ExportAudioPreparation.clickSounds(
-               events: events, set: set, volume: mix.clickSoundEffectVolume,
-               duration: sourceDuration.seconds, directory: scratch) {
-            try await addAudio(asset: clicks.asset, track: clicks.track, role: .clicks)
-        }
+        // Missing music fails before anything is encoded.
+        let (sourceTracks, music) = try await ExportAudioPreparation.makeTracks(
+            asset: asset, sourceDuration: sourceDuration, outputDuration: duration, timeline: renderer.edit,
+            roles: audioRoles, mix: mix, events: events, sessionDirectory: sessionDirectory, scratch: scratch,
+            writer: writer, mixdown: mixdown)
+        var audio: [ExportAudioTrack] = mixdown ? [] : sourceTracks
         if let mix, mixdown {
             // One stereo track: every source in playback time, summed with its gain, then optional
             // loudness normalization and the limiter.
-            let frameCount = Int((duration.seconds * AudioFileIO.sampleRate).rounded())
-            var summed: [(audio: PCMAudio, track: MixTrack)] = []
-            do {
-                for source in mixSources {
-                    try source.start()
-                    summed.append((try source.renderPCM(), MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .systemAudio)))
-                }
-            } catch {
-                for source in mixSources { source.cancel() }
-                throw error
-            }
-            if let music { summed.append((music, MixTrack(url: scratch, gain: 1, startOffset: 0, kind: .backgroundAudio))) }
-            if summed.contains(where: { $0.audio.frameCount > 0 }), frameCount > 0 {
-                var mixed = AudioMixer.sum(summed, frameCount: frameCount)
-                summed = []
-                AudioMixer.finalize(&mixed, limiterCeilingDB: mix.limiterCeilingDB, targetLoudnessLUFS: mix.targetLoudnessLUFS)
-                if let file = try await ExportAudioPreparation.write(mixed, named: "mixdown", directory: scratch) {
-                    audio.append(try await ExportAudioTrack(
-                        asset: file.asset, track: file.track,
-                        timeRange: CMTimeRange(start: .zero, duration: duration), writer: writer))
-                }
+            if let mixed = try ExportAudioPreparation.sumSources(
+                sourceTracks, music: music, outputDuration: duration.seconds, mix: mix, finalize: true, scratch: scratch),
+               let file = try await ExportAudioPreparation.write(mixed, named: "mixdown", directory: scratch) {
+                audio.append(try await ExportAudioTrack(
+                    asset: file.asset, track: file.track,
+                    timeRange: CMTimeRange(start: .zero, duration: duration), writer: writer))
             }
         } else if let music, let file = try await ExportAudioPreparation.write(music, named: "background-music", directory: scratch) {
             // Already in playback time with gain and fade baked in, so it bypasses the edit plan.
