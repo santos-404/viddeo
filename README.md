@@ -34,7 +34,7 @@ Viddeo turns screen recordings into polished walkthroughs, product demos, and qu
 
 ## Get started
 
-Requires **macOS 26+** and **Xcode with a macOS 26+ SDK**, selected with `xcode-select`. No dependency installation is needed.
+Requires **macOS 26+**, **Xcode with a macOS 26+ SDK**, selected with `xcode-select`, and **Node.js** on your `PATH` for the build script. The app has no third-party runtime dependencies.
 
 ```sh
 ./Scripts/build.sh
@@ -75,3 +75,10 @@ Run the verification suite:
 The suite checks capture and export behavior with synthetic media. Live recording, device permissions, and audio/video sync also need hands-on testing.
 
 Explore the [architecture](docs/architecture.md), [specification](docs/spec.md), and [development plan](docs/plan.md).
+
+## License
+
+Copyright (C) 2026 Javier Santos.
+
+Viddeo is licensed under the [GNU General Public License, version 3 only](LICENSE)
+(`GPL-3.0-only`). Third-party material retains its own licenses.
