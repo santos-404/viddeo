@@ -80,6 +80,11 @@ struct RecordingView: View {
                 Button("Stop") { viewModel.stopRecording() }
                     .disabled(!viewModel.canStop)
                 Spacer()
+                if viewModel.phase == .exporting {
+                    Button("Cancel Export") { viewModel.cancelExport() }
+                }
+                Button("Copy to Clipboard") { viewModel.exportRecording(target: .clipboard) }
+                    .disabled(!viewModel.canExport)
                 Button("Export") { viewModel.exportRecording() }
                     .disabled(!viewModel.canExport)
             }
@@ -90,7 +95,7 @@ struct RecordingView: View {
                 Button("Show Recording") { viewModel.revealSession() }
                     .disabled(viewModel.sessionDirectory == nil)
                 if viewModel.exportedURL != nil {
-                    Button("Show Export") { viewModel.revealExport() }
+                    Button("Show in Finder") { viewModel.revealExport() }
                 }
             }
 

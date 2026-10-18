@@ -34,6 +34,7 @@ final class RecordingViewModel {
     private(set) var sessionDirectory: URL?
     private(set) var operationError: String?
     private(set) var exportedURL: URL?
+    private(set) var exportPhase = ExportPhase.idle
     private(set) var editor: EditorModel?
     private(set) var catalog = ExportPresetCatalog.builtIn
     var selectedPresetID: String {
@@ -209,35 +210,92 @@ final class RecordingViewModel {
         }
     }
 
-    func exportRecording() {
+    func exportRecording(target: ExportTarget = .file) {
         guard canExport, let session, let directory = sessionDirectory, let editor else { return }
         let edit = editor.exportEdit
         let settings = selectedPreset.settings.normalized()
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [settings.format == .gif ? .gif : .mpeg4Movie]
-        panel.nameFieldStringValue = "viddeo-\(session.id.uuidString.prefix(8)).\(settings.format == .gif ? "gif" : "mp4")"
-        if settings.format == .mp4 && settings.codec == .both {
-            panel.message = "A second file with an -h265 suffix will be written next to the one you choose."
+        let fileExtension = settings.format == .gif ? "gif" : "mp4"
+        let destination: URL
+        switch target {
+        case .file:
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [settings.format == .gif ? .gif : .mpeg4Movie]
+            panel.nameFieldStringValue = ExportDestinationPolicy.defaultFileName(
+                projectName: editor.project.name, date: Date(), format: fileExtension)
+            if settings.format == .mp4 && settings.codec == .both {
+                panel.message = "A second file with an -h265 suffix will be written next to the one you choose."
+            }
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            destination = url
+        case .clipboard:
+            destination = ExportDestinationPolicy.clipboardURL(date: Date(), format: fileExtension)
+            do {
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+            } catch {
+                operationError = error.localizedDescription
+                status = "Could not prepare the clipboard export."
+                return
+            }
         }
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let outputs = settings.format == .gif ? [destination] : settings.outputURLs(for: destination).map(\.url)
+        // File exports render into a staging folder and replace the chosen files only on success (the
+        // save panel already confirmed any replacement); clipboard destinations are always new files.
+        let staging = target == .file ? ExportDelivery.stagingDirectory(for: destination) : nil
+        let renderDestination = staging?.appendingPathComponent(destination.lastPathComponent) ?? destination
+        let rendered = settings.format == .gif ? [renderDestination] : settings.outputURLs(for: renderDestination).map(\.url)
         phase = .exporting
+        exportPhase = .rendering
         operationError = nil
         status = "Rendering zooms, click effects and audio…"
         operation = Task {
             do {
-                try await exporter.export(session: session, directory: directory, destination: destination,
+                if let staging {
+                    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                }
+                try await exporter.export(session: session, directory: directory, destination: renderDestination,
                                           showsClickEffects: showsClickEffects, settings: settings, edit: edit)
+                if Task.isCancelled { throw CancellationError() }
+                exportPhase = .delivering
+                if let staging {
+                    try ExportDelivery.commitStaged(Array(zip(rendered, outputs)).map { (staged: $0.0, final: $0.1) },
+                                                    staging: staging)
+                }
                 exportedURL = destination
-                let names = settings.format == .gif
-                    ? [destination.lastPathComponent]
-                    : settings.outputURLs(for: destination).map(\.url.lastPathComponent)
-                status = "Export saved to \(names.joined(separator: " and "))."
+                let names = outputs.map(\.lastPathComponent).joined(separator: " and ")
+                switch target {
+                case .file:
+                    status = "Export saved to \(names)."
+                    revealExport()
+                case .clipboard:
+                    guard ExportDelivery.copyFileReferences(outputs, to: .general) else {
+                        throw ExportDeliveryError.clipboardRejected
+                    }
+                    status = "Copied \(names) to the clipboard — paste it into any app that accepts files."
+                }
+                exportPhase = .completed
             } catch {
-                operationError = error.localizedDescription
-                status = "Export failed. Raw recording is still available."
+                ExportDelivery.removeIncompleteOutputs(staging.map { [$0] } ?? rendered)
+                if error is CancellationError || Task.isCancelled {
+                    exportPhase = .cancelled
+                    exportedURL = nil
+                    status = "Export cancelled."
+                } else {
+                    exportPhase = .failed
+                    exportedURL = nil
+                    operationError = error.localizedDescription
+                    status = "Export failed. Raw recording is still available."
+                }
             }
             phase = .idle
         }
+    }
+
+    /// Cancels a running export; incomplete outputs are removed once the render stops.
+    func cancelExport() {
+        guard phase == .exporting else { return }
+        status = "Cancelling export…"
+        operation?.cancel()
     }
 
     @ObservationIgnored private var activeDirectory: URL?
@@ -322,6 +380,11 @@ final class RecordingViewModel {
         await editor?.finishOperation()
         return preserveEdits()
     }
+}
+
+private enum ExportDeliveryError: LocalizedError {
+    case clipboardRejected
+    var errorDescription: String? { "The export was rendered but could not be placed on the clipboard." }
 }
 
 private extension String {
