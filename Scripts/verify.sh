@@ -7,7 +7,7 @@ mkdir -p .build
 VIDDEO_TARGET="$(uname -m)-apple-macosx26.0"
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Scripts/verify-zoom.swift -o .build/verify-zoom
 .build/verify-zoom
 
@@ -18,14 +18,14 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-capture
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
   Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamCutout.swift Viddeo/Sources/WebcamOverlay.swift Viddeo/Sources/SilenceDetector.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/DeviceFrameRenderer.swift Viddeo/Sources/StageRenderer.swift \
-  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Scripts/verify-export.swift \
+  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/Masks.swift Scripts/verify-export.swift \
   -o .build/verify-export
 .build/verify-export
 
@@ -77,14 +77,14 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-webcam
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
   Viddeo/Sources/WebcamExport.swift Viddeo/Sources/WebcamCutout.swift Viddeo/Sources/WebcamOverlay.swift Viddeo/Sources/SilenceDetector.swift \
   Viddeo/Sources/TimelineModel.swift Viddeo/Sources/Project.swift \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/DeviceFrameRenderer.swift Viddeo/Sources/StageRenderer.swift \
-  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/ShortcutOverlay.swift Scripts/verify-color.swift \
+  Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/Masks.swift Scripts/verify-color.swift \
   -o .build/verify-color
 .build/verify-color
 
@@ -100,7 +100,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-cursor
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -109,7 +109,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/DeviceFrameRenderer.swift Viddeo/Sources/StageRenderer.swift \
   Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \
   Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
-  Viddeo/Sources/EditorModel.swift Scripts/verify-editor.swift -o .build/verify-editor
+  Viddeo/Sources/EditorModel.swift Viddeo/Sources/Masks.swift Scripts/verify-editor.swift -o .build/verify-editor
 .build/verify-editor
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
@@ -118,7 +118,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-events
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -127,11 +127,11 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/DeviceFrameRenderer.swift Viddeo/Sources/StageRenderer.swift \
   Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \
   Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
-  Viddeo/Sources/EditorModel.swift Viddeo/Sources/EditorPreview.swift Scripts/verify-preview.swift -o .build/verify-preview
+  Viddeo/Sources/EditorModel.swift Viddeo/Sources/EditorPreview.swift Viddeo/Sources/Masks.swift Scripts/verify-preview.swift -o .build/verify-preview
 .build/verify-preview
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -140,7 +140,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
   Viddeo/Sources/StageStyle.swift Viddeo/Sources/DeviceFrameRenderer.swift Viddeo/Sources/StageRenderer.swift \
   Viddeo/Sources/Captions.swift Viddeo/Sources/CaptionRenderer.swift Viddeo/Sources/SpeechCaptionProvider.swift \
   Viddeo/Sources/SilenceDetector.swift Viddeo/Sources/TimelineSilence.swift \
-  Viddeo/Sources/EditorModel.swift Viddeo/Sources/EditorPreview.swift Scripts/verify-preview-audio.swift -o .build/verify-preview-audio
+  Viddeo/Sources/EditorModel.swift Viddeo/Sources/EditorPreview.swift Viddeo/Sources/Masks.swift Scripts/verify-preview-audio.swift -o .build/verify-preview-audio
 .build/verify-preview-audio
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \

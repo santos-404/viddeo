@@ -233,7 +233,7 @@ final class OfflineExporter {
         var renderer = ExportFrameRenderer(
             sourceWidth: session.width, sourceHeight: session.height,
             outputWidth: size.width, outputHeight: size.height,
-            timeline: ZoomTimeline(session: session, configuration: zoomConfiguration),
+            timeline: .unzoomed,
             clickTimeline: clickTimeline,
             edit: edit?.timeline,
             stage: try edit?.stage.map { try StageRenderer(style: $0, outputSize: outputSize, baseDirectory: sessionDirectory) },
@@ -254,6 +254,8 @@ final class OfflineExporter {
             renderer.cursorBlurQuality = .preview
             renderer.screenBlur = .preview(amount: storedCursor.motionBlurAmount, fps: Double(settings.fps))
         }
+        let maskConfiguration = try edit?.masks ?? MaskConfiguration.load(from: directory)
+        if !maskConfiguration.masks.isEmpty { renderer.masks = MaskTimeline(configuration: maskConfiguration) }
         if let shortcuts = edit?.shortcuts {
             let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
                 ?? renderer.contentRect
@@ -269,6 +271,14 @@ final class OfflineExporter {
                 outputSize: outputSize, contentRect: contentRect, stage: renderer.stage,
                 cutoutQuality: previewWidth == nil ? .balanced : .fast)
         }
+        // Resolve auto-zoom only after stage and split-pane geometry are available.
+        renderer.timeline = ZoomTimeline(session: session, configuration: zoomConfiguration, visibleSourceSize: { [renderer] time, zoom in
+            let screen = renderer.splitScreenLayout(at: time, camera: nil, zoomScale: zoom)
+            let rect = screen?.screenPane.flatMap { renderer.stage?.deviceScreenRect(in: $0) } ?? screen?.screen
+                ?? renderer.stage?.screenRect(contentAspect: Double(session.width) / Double(session.height)) ?? renderer.contentRect
+            return ZoomVisibleGeometry(sourceSize: CGSize(width: session.width, height: session.height),
+                                       viewportSize: outputSize, unzoomedScreenSize: rect.size).visibleSourceSize(atZoom: zoom)
+        })
         // The output runs in playback time; without a timeline that is the recording itself.
         let outputDuration = edit?.timeline.map { CMTime(seconds: $0.playbackDuration, preferredTimescale: 60_000) } ?? duration
         return PreparedRender(renderer: renderer, outputDuration: outputDuration, sourceDuration: duration,
@@ -470,6 +480,11 @@ final class OfflineExporter {
 /// rect and the stage (background, padding, radius, shadow) fills the whole canvas. Captions
 /// are drawn last, over the full canvas.
 ///
+/// Layer order, bottom to top: source footage → masks (sensitive-data blur / highlight dim, in
+/// source pixel space, so they follow zoom and crop) → click effects → rendered cursor → zoom/crop
+/// and fit (screen motion blur) → stage → camera → shortcut overlay → captions. Masks therefore sit
+/// under everything drawn on the footage and never cover the cursor, camera, captions or shortcuts.
+///
 /// `image(source:at:)` takes SOURCE time: zoom, clicks and caption cues are all stored in
 /// raw-recording time. Callers map each output (playback) time through `sourceTime(forPlaybackTime:)`.
 struct ExportFrameRenderer: Sendable {
@@ -477,12 +492,14 @@ struct ExportFrameRenderer: Sendable {
     let sourceHeight: Int
     let outputWidth: Int
     let outputHeight: Int
-    let timeline: ZoomTimeline
+    var timeline: ZoomTimeline
     let clickTimeline: ClickEffectTimeline?
     var edit: TimelineModel? = nil
     var stage: StageRenderer? = nil
     var captions: CaptionRenderer? = nil
     var shortcuts: ShortcutOverlayRenderer? = nil
+    /// Mask timeline in SOURCE time; applied to the normalized source frame before clicks and cursor.
+    var masks: MaskTimeline? = nil
     /// Mapped source times are clamped below this (the decodable media's end).
     var sourceDuration: Double = .infinity
     var cursorTimeline: CursorTimeline? = nil
@@ -532,9 +549,16 @@ struct ExportFrameRenderer: Sendable {
         let normalizedSource = rawSource.transformed(
             by: CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY)
         )
+        // Masks come first: they are attached to source pixels (normalized top-left rectangles over
+        // the oriented source extent), so the zoom/crop below carries them, and the click effects
+        // and cursor are drawn on top of them.
+        var footage = normalizedSource
+        if let masks, let mask = masks.state(atSource: time) {
+            footage = MaskRenderer.apply(mask, to: normalizedSource, sourceExtent: normalizedSource.extent)
+        }
         // Click locations are in the original top-left source coordinate
         // space, so render them before applying the zoom transform.
-        var image = clickTimeline?.image(over: normalizedSource, at: time) ?? normalizedSource
+        var image = clickTimeline?.image(over: footage, at: time) ?? footage
         let hideCursor = edit?.segments.first { $0.sourceStart <= time && time < $0.sourceEnd }?.hideCursor ?? false
         if !hideCursor, let cursorTimeline, let cursorRenderer,
            let cursor = cursorRenderer.image(for: cursorTimeline.trail(at: time, fps: cursorFPS),
@@ -649,7 +673,7 @@ struct ExportFrameRenderer: Sendable {
 
     /// The split-screen layout at `time` (source seconds), or nil for every other layout: the screen then keeps
     /// its normal placement. Its `screen` rect is the pane the zoomed, motion-blurred screen is fitted into.
-    private func splitScreenLayout(at time: Double, camera: CIImage?, zoomScale: Double) -> WebcamOverlay.ResolvedLayout? {
+    fileprivate func splitScreenLayout(at time: Double, camera: CIImage?, zoomScale: Double) -> WebcamOverlay.ResolvedLayout? {
         guard let webcam, webcam.overlay.layout(atMs: time * 1000) == .splitScreen else { return nil }
         return webcam.resolve(atSource: time, camera: camera, zoomScale: zoomScale)
     }

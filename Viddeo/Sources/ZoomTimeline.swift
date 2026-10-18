@@ -121,13 +121,40 @@ struct ZoomRange: Sendable, Equatable {
     var end: Double
 }
 
+/// All sizes use the same resolved output coordinate system, except `sourceSize` (source pixels).
+/// The visible part is capped per axis at the whole source, as in the reference layout resolver.
+struct ZoomVisibleGeometry: Sendable {
+    var sourceSize: CGSize
+    var viewportSize: CGSize
+    var unzoomedScreenSize: CGSize
+
+    func visibleSourceSize(atZoom scale: Double) -> CGSize {
+        CGSize(width: sourceSize.width * min(1, viewportSize.width / (unzoomedScreenSize.width * scale)),
+               height: sourceSize.height * min(1, viewportSize.height / (unzoomedScreenSize.height * scale)))
+    }
+}
+
 /// Pure offline analysis. Grouping and physical smoothing are independent of the media API.
 struct ZoomTimeline: Sendable {
     let ranges: [ZoomRange]
     private let frames: [ZoomFrame]
     private let fps: Double
 
-    init(session: RecordingSession, configuration: ZoomConfiguration = .init()) {
+    /// Used only while assembling a renderer, before its resolved stage and webcam plan exist.
+    static let unzoomed = Self()
+
+    private init() {
+        ranges = []
+        frames = [ZoomFrame(time: 0, scale: 1, centerX: 0.5, centerY: 0.5)]
+        fps = 60
+    }
+
+    /// The provider receives each range's SOURCE start time (seconds) and selected zoom, and
+    /// returns the visible source width/height in source pixels. It is consumed during construction;
+    /// no closure or renderer state survives in the immutable sample table. Nil preserves the
+    /// legacy full-source viewport for callers without resolved geometry.
+    init(session: RecordingSession, configuration: ZoomConfiguration = .init(),
+         visibleSourceSize: ((Double, Double) -> CGSize)? = nil) {
         // Export validates user configuration; pure callers get safe defaults.
         let config = (try? configuration.validate()) == nil ? ZoomConfiguration() : configuration
         fps = config.framesPerSecond
@@ -149,16 +176,19 @@ struct ZoomTimeline: Sendable {
             }
         }
         ranges = merged
-        let groups = merged.map { Self.groups(events: events, range: $0, session: session, scale: config.scale) }
-        var x = Spring(value: 0.5)
-        var y = Spring(value: 0.5)
-        var scale = Spring(value: 1)
+        let groups = merged.map { range in
+            let fallback = CGSize(width: Double(session.width) / config.scale, height: Double(session.height) / config.scale)
+            let resolved = visibleSourceSize?(range.start, config.scale) ?? fallback
+            let valid = resolved.width.isFinite && resolved.height.isFinite && resolved.width > 0 && resolved.height > 0
+            return Self.groups(events: events, range: range, session: session, visibleSourceSize: valid ? resolved : fallback)
+        }
+        let springConfig = SpringConfiguration(stiffness: config.stiffness, damping: config.damping, mass: config.mass)
+        var x = Spring(value: 0.5, configuration: springConfig)
+        var y = Spring(value: 0.5, configuration: springConfig)
+        var scale = Spring(value: 1, configuration: springConfig)
         var samples: [ZoomFrame] = []
         var rangeIndex = 0
-        let maxStep = min(0.001, 0.5 * config.mass / config.damping,
-                          0.2 * sqrt(config.mass / config.stiffness))
-        let substeps = Int(ceil(1 / fps / maxStep))
-        let dt = 1 / fps / Double(substeps)
+        let stepMilliseconds = 1000 / fps
         let count = Int(ceil(duration * fps)) + 1
         for index in 0..<count {
             let time = Double(index) / fps
@@ -170,13 +200,15 @@ struct ZoomTimeline: Sendable {
             let targetX = group?.x ?? 0.5
             let targetY = group?.y ?? 0.5
             if index > 0 {
-                // Small fixed substeps keep tuning configurations stable at every output FPS.
-                for _ in 0..<substeps {
-                    x.advance(to: targetX, dt: dt, config: config)
-                    y.advance(to: targetY, dt: dt, config: config)
-                    scale.advance(to: targetScale, dt: dt, config: config)
-                }
+                // Like the reference animation timeline: advance toward the previous frame's
+                // targets, then install this frame's targets without clearing velocity.
+                x.advance(milliseconds: stepMilliseconds)
+                y.advance(milliseconds: stepMilliseconds)
+                scale.advance(milliseconds: stepMilliseconds)
             }
+            x.setTarget(targetX)
+            y.setTarget(targetY)
+            scale.setTarget(targetScale)
             let visibleScale = min(config.scale, max(1, scale.value))
             let margin = 0.5 / visibleScale
             samples.append(ZoomFrame(time: time, scale: visibleScale,
@@ -205,7 +237,9 @@ struct ZoomTimeline: Sendable {
     }
 
     private static func groups(events: [CursorEvent], range: ZoomRange,
-                               session: RecordingSession, scale: Double) -> [Group] {
+                               session: RecordingSession, visibleSourceSize: CGSize) -> [Group] {
+        let maxWidth = 0.5 * min(1, Double(visibleSourceSize.width) / max(1, Double(session.width)))
+        let maxHeight = 0.5 * min(1, Double(visibleSourceSize.height) / max(1, Double(session.height)))
         var selected = events.filter { $0.time >= range.start && $0.time <= range.end }
         if let previous = events.last(where: { $0.time < range.start }) {
             var boundary = previous
@@ -227,7 +261,7 @@ struct ZoomTimeline: Sendable {
         for event in thinned {
             let newMinX = min(minX, event.x), newMaxX = max(maxX, event.x)
             let newMinY = min(minY, event.y), newMaxY = max(maxY, event.y)
-            if !current.isEmpty && (newMaxX - newMinX > 0.5 / scale || newMaxY - newMinY > 0.5 / scale) {
+            if !current.isEmpty && (newMaxX - newMinX > maxWidth || newMaxY - newMinY > maxHeight) {
                 chunks.append(current)
                 current = []
                 minX = event.x; maxX = event.x; minY = event.y; maxY = event.y
@@ -248,21 +282,6 @@ struct ZoomTimeline: Sendable {
             let fallback = chunk.last!
             return Group(start: chunk[0].time, x: weight > 0 ? x / weight : fallback.x,
                          y: weight > 0 ? y / weight : fallback.y)
-        }
-    }
-}
-
-private struct Spring {
-    var value: Double
-    var velocity = 0.0
-
-    mutating func advance(to target: Double, dt: Double, config: ZoomConfiguration) {
-        let acceleration = (config.stiffness * (target - value) - config.damping * velocity) / config.mass
-        velocity += acceleration * dt
-        value += velocity * dt
-        if abs(target - value) < 0.00001 && abs(velocity) < 0.00001 {
-            value = target
-            velocity = 0
         }
     }
 }

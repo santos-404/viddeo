@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 @main
@@ -190,6 +191,56 @@ struct VerifyEditor {
         let savedCursor = try CursorConfiguration.load(in: blurDirectory)
         try check(savedCursor.motionBlurAmount == 0.4 && savedCursor.size == 72, "motion blur saved without touching other cursor settings")
         try check(try EditorModel(session: session, directory: blurDirectory).state.motionBlurAmount == 0.4, "reopened editor keeps motion blur")
+        // Masks: add at the playhead (clamped, default rectangle), edit, undo/redo, validation, save and reload.
+        let maskDirectory = directory.appendingPathComponent("mask-session")
+        try FileManager.default.createDirectory(at: maskDirectory, withIntermediateDirectories: true)
+        try session.save(in: maskDirectory)
+        let maskEditor = try EditorModel(session: session, directory: maskDirectory)
+        try check(maskEditor.state.masks.masks.isEmpty && maskEditor.exportEdit.masks?.masks.isEmpty == true, "no masks by default")
+        let beforeMask = maskEditor.state
+        maskEditor.addMask(atSource: 2)
+        let added = maskEditor.state.masks.masks.first
+        try check(maskEditor.state.masks.masks.count == 1 && added?.sourceStart == 2 && added?.sourceEnd == 2 + TimelineMask.initialDuration
+                  && added?.kind == .sensitiveData && added?.blur == 32 && maskEditor.error == nil, "mask added at the playhead")
+        try check(added?.bounds == [TimelineMask.defaultBounds(recordingSize: CGSize(width: 640, height: 360))], "mask gets the default bounds for the recording size")
+        try check(maskEditor.exportEdit.masks == maskEditor.state.masks && maskEditor.isDirty, "unsaved mask reaches the export")
+        maskEditor.undo()
+        try check(maskEditor.state == beforeMask && maskEditor.canRedo, "mask add undo")
+        maskEditor.redo()
+        try check(maskEditor.state.masks.masks.first == added, "mask add redo")
+        maskEditor.addMask(atSource: 7.5)
+        try check(maskEditor.state.masks.masks[1].sourceStart == 5 && maskEditor.state.masks.masks[1].sourceEnd == 8, "mask added near the end is clamped to the recording")
+        maskEditor.undo()
+        let maskID = maskEditor.state.masks.masks[0].id
+        maskEditor.edit { state in
+            state.masks.masks[0].kind = .highlight
+            state.masks.masks[0].highlightOpacity = 0.7
+            state.masks.masks[0].bounds = [CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)]
+            state.masks.masks[0].isDisabled = true
+            state.masks.masks[0].sourceEnd = 6
+        }
+        let editedMask = maskEditor.state
+        try check(editedMask.masks.masks[0].kind == .highlight && editedMask.masks.masks[0].isDisabled, "mask edited")
+        maskEditor.edit { $0.masks.masks[0].sourceEnd = $0.masks.masks[0].sourceStart + 0.1 }
+        try check(maskEditor.state == editedMask && maskEditor.error != nil, "a mask under 0.5 s is rejected")
+        maskEditor.edit { $0.masks.masks[0].sourceEnd = 9 }
+        try check(maskEditor.state == editedMask && maskEditor.error != nil, "a mask past the recording end is rejected")
+        maskEditor.edit { $0.masks.masks[0].bounds = [CGRect(x: 0.8, y: 0, width: 0.5, height: 0.5)] }
+        try check(maskEditor.state == editedMask && maskEditor.error != nil, "a mask outside the frame is rejected")
+        maskEditor.edit { $0.masks.masks[0].highlightOpacity = 2 }
+        try check(maskEditor.state == editedMask && maskEditor.error != nil, "invalid highlight opacity is rejected")
+        try check(!FileManager.default.fileExists(atPath: maskDirectory.appendingPathComponent("masks.json").path), "unsaved masks write nothing")
+        try check(maskEditor.save(presetID: "custom-preset"), "masks saved")
+        try check(try MaskConfiguration.load(from: maskDirectory) == editedMask.masks, "masks.json roundtrip")
+        try check(try ExportEdit.load(from: maskDirectory, session: session).masks == editedMask.masks, "sidecar loader reads masks.json")
+        let reopenedMasks = try EditorModel(session: session, directory: maskDirectory)
+        try check(reopenedMasks.state.masks == editedMask.masks && !reopenedMasks.canUndo, "reopened editor keeps masks")
+        reopenedMasks.edit { $0.masks.masks.removeAll { $0.id == maskID } }
+        try check(reopenedMasks.exportEdit.masks?.masks.isEmpty == true, "an unsaved mask delete overrides the file for the export")
+        try check(reopenedMasks.save(presetID: "custom-preset") && (try MaskConfiguration.load(from: maskDirectory)).masks.isEmpty, "mask delete saved")
+        try check(try ExportEdit.load(from: maskDirectory, session: session).masks == nil, "no masks, no export masks")
+        reopenedMasks.undo()
+        try check(reopenedMasks.state.masks == editedMask.masks, "mask delete undo")
         // Refuse damaged/newer project files instead of silently resetting edits.
         try Data("{\"version\":99}".utf8).write(to: directory.appendingPathComponent("project.json"))
         do {

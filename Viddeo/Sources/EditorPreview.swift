@@ -394,6 +394,7 @@ struct EditorPreview: View {
         var settings: ExportSettings
         var showsClickEffects: Bool
         var clickEffect: ClickEffectConfiguration
+        var masks: MaskConfiguration
     }
 
     /// Everything that changes the sound: the edit plan and the audio mix. Picture-only settings do not.
@@ -409,7 +410,7 @@ struct EditorPreview: View {
             captions: editor.state.captions, captionConfiguration: editor.state.captionConfiguration,
             webcam: editor.state.webcam, shortcuts: editor.state.shortcuts,
             motionBlurAmount: editor.state.motionBlurAmount, settings: settings, showsClickEffects: showsClickEffects,
-            clickEffect: editor.state.clickEffect)
+            clickEffect: editor.state.clickEffect, masks: editor.state.masks)
     }
 
     var body: some View {

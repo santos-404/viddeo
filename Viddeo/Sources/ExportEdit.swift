@@ -29,12 +29,17 @@ struct ExportEdit: Sendable {
     /// Click effect settings from the editor. Nil uses the session's `click-config.json`. The
     /// "show click effects" export toggle still turns every effect off.
     var clickEffect: ClickEffectConfiguration?
+    /// Sensitive-data and highlight masks (source time, normalized source-space rectangles). Nil uses
+    /// the session's `masks.json`; an explicit empty configuration (editor with every mask deleted)
+    /// overrides the file and renders none.
+    var masks: MaskConfiguration?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
          audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil,
          shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil,
-         motionBlurAmount: Double? = nil, clickEffect: ClickEffectConfiguration? = nil) {
+         motionBlurAmount: Double? = nil, clickEffect: ClickEffectConfiguration? = nil,
+         masks: MaskConfiguration? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
@@ -43,14 +48,15 @@ struct ExportEdit: Sendable {
         self.shortcuts = shortcuts.flatMap { $0.configuration.enabled && !$0.events.isEmpty ? $0 : nil }
         self.motionBlurAmount = motionBlurAmount
         self.clickEffect = clickEffect
+        self.masks = masks
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil && clickEffect == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil && clickEffect == nil && masks == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
     /// when the configuration is enabled and the track has cues, `audio-config.json` → the audio mix
-    /// when it changes anything. Absent files leave the field nil;
+    /// when it changes anything, `masks.json` → the masks when it holds any. Absent files leave the field nil;
     /// present but invalid files throw.
     static func load(from directory: URL, session: RecordingSession) throws -> ExportEdit {
         let manager = FileManager.default
@@ -79,6 +85,8 @@ struct ExportEdit: Sendable {
             let audio = try AudioMixConfiguration.load(in: directory)
             edit.audio = audio.isExportNeutral ? nil : audio
         }
+        let masks = try MaskConfiguration.load(from: directory)
+        if !masks.masks.isEmpty { edit.masks = masks }
         return edit
     }
 }

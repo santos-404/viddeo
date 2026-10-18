@@ -29,6 +29,7 @@ struct EditorView: View {
                 timeline.tabItem { Text("Timeline") }
                 stage.tabItem { Text("Background") }
                 captions.tabItem { Text("Captions") }
+                masks.tabItem { Text("Masks") }
                 audio.tabItem { Text("Audio") }
                 if editor.session.webcam != nil { camera.tabItem { Text("Camera") } }
                 if editor.hasShortcuts { shortcuts.tabItem { Text("Shortcuts") } }
@@ -226,6 +227,89 @@ struct EditorView: View {
                 }
             }
         }.padding(12)
+    }
+
+    private var masks: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button("Add mask at playhead") {
+                    editor.addMask(atSource: editor.state.timeline.sourceTime(forPlaybackTime: previewModel.time))
+                }
+                Text("Ranges use source seconds, at least \(TimelineMask.minDuration.formatted()) s. Masks are applied to the recording before zoom, so they follow it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(editor.state.masks.masks) { mask in maskRow(mask) }
+                    if editor.state.masks.masks.isEmpty {
+                        Text("No masks. Add one to blur sensitive data or highlight an area.").foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }.padding(12)
+    }
+
+    private func updateMask(_ id: UUID, key: String? = nil, _ change: @escaping (inout TimelineMask) -> Void) {
+        editor.edit({ state in
+            if let index = state.masks.masks.firstIndex(where: { $0.id == id }) { change(&state.masks.masks[index]) }
+        }, key: key.map { "mask-\(id)-\($0)" })
+    }
+
+    private func maskRow(_ mask: TimelineMask) -> some View {
+        let duration = editor.session.duration
+        let rect = mask.bounds.first ?? .zero
+        let minDuration = TimelineMask.minDuration
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Picker("Kind", selection: Binding(get: { mask.kind }, set: { kind in updateMask(mask.id) { $0.kind = kind } })) {
+                    Text("Blur sensitive data").tag(MaskKind.sensitiveData)
+                    Text("Highlight").tag(MaskKind.highlight)
+                }
+                .frame(width: 280)
+                Toggle("Enabled", isOn: Binding(get: { !mask.isDisabled }, set: { on in updateMask(mask.id) { $0.isDisabled = !on } }))
+                Spacer()
+                Button("Delete") { editor.edit { $0.masks.masks.removeAll { $0.id == mask.id } } }
+            }
+            HStack {
+                number("Start", value: Binding(get: { mask.sourceStart }, set: { value in
+                    updateMask(mask.id) { $0.sourceStart = min(max(0, value.isFinite ? value : 0), $0.sourceEnd - minDuration) }
+                }))
+                number("End", value: Binding(get: { mask.sourceEnd }, set: { value in
+                    updateMask(mask.id) { $0.sourceEnd = max(min(duration, value.isFinite ? value : duration), $0.sourceStart + minDuration) }
+                }))
+                Text("s").foregroundStyle(.secondary)
+            }
+            maskSlider("X", value: rect.minX, range: 0...1, id: mask.id) { m, v in
+                var r = m.bounds.first ?? .zero; r.origin.x = min(v, 1 - r.width); m.bounds = [r] + m.bounds.dropFirst()
+            }
+            maskSlider("Y", value: rect.minY, range: 0...1, id: mask.id) { m, v in
+                var r = m.bounds.first ?? .zero; r.origin.y = min(v, 1 - r.height); m.bounds = [r] + m.bounds.dropFirst()
+            }
+            maskSlider("Width", value: rect.width, range: 0...1, id: mask.id) { m, v in
+                var r = m.bounds.first ?? .zero; r.size.width = min(max(v, 0.01), 1 - r.minX); m.bounds = [r] + m.bounds.dropFirst()
+            }
+            maskSlider("Height", value: rect.height, range: 0...1, id: mask.id) { m, v in
+                var r = m.bounds.first ?? .zero; r.size.height = min(max(v, 0.01), 1 - r.minY); m.bounds = [r] + m.bounds.dropFirst()
+            }
+            if mask.kind == .sensitiveData {
+                maskSlider("Blur", value: mask.blur, range: 0...128, id: mask.id) { m, v in m.blur = v }
+            } else {
+                maskSlider("Dim outside", value: mask.highlightOpacity, range: 0...1, id: mask.id) { m, v in m.highlightOpacity = v }
+            }
+            Divider()
+        }
+        .opacity(mask.isDisabled ? 0.6 : 1)
+    }
+
+    private func maskSlider(_ title: String, value: Double, range: ClosedRange<Double>, id: UUID,
+                            _ apply: @escaping (inout TimelineMask, Double) -> Void) -> some View {
+        HStack {
+            Text(title).frame(width: 80, alignment: .leading)
+            Slider(value: Binding(get: { value }, set: { newValue in
+                updateMask(id, key: title) { apply(&$0, newValue) }
+            }), in: range)
+            Text(value.formatted(.number.precision(.fractionLength(2)))).monospacedDigit().frame(width: 45)
+        }
     }
 
     private var shortcuts: some View {

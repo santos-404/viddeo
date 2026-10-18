@@ -196,10 +196,11 @@ struct VerifyExport {
         try await verifyAudioMix(root: directory, width: width, height: height, duration: duration)
         try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
         try await verifyShortcuts(root: directory, width: width, height: height, duration: duration)
+        try await verifyMasks(root: directory, width: width, height: height, duration: duration)
 
         try await verifyScreenMotionBlur(session: session, directory: directory)
         try await verifyRenderedCursor(session: session, directory: directory)
-        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); split-screen (direction, flip, ratio, stage gap), timed layout items, cutout (fallback, cached, injected mask); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load).")
+        print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); split-screen (direction, flip, ratio, stage gap), timed layout items, cutout (fallback, cached, injected mask); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load); masks (sensitive-data blur and highlight dim inside their time range only, following a 2× zoom, masks.json via ExportEdit.load and the exporter fallback).")
     }
 
     /// Screen / zoom motion blur through the real renderer. The click at 3.0 s starts a fast zoom-in
@@ -748,7 +749,8 @@ struct VerifyExport {
     }
 
     private static func makeFixture(url: URL, width: Int, height: Int, duration: Double,
-                                    transform: CGAffineTransform = .identity, noise: Bool = false) async throws {
+                                    transform: CGAffineTransform = .identity, noise: Bool = false,
+                                    checker: Bool = false) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -789,7 +791,9 @@ struct VerifyExport {
                   let buffer = maybeBuffer else {
                 throw VerificationError.failed("could not allocate fixture frame")
             }
-            if noise {
+            if checker {
+                paintChecker(buffer, width: width, height: height)
+            } else if noise {
                 paintNoise(buffer, width: width, height: height, generator: &noiseGenerator)
             } else {
                 paintFixture(buffer, width: width, height: height, frameIndex: frameIndex)
@@ -803,6 +807,18 @@ struct VerifyExport {
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw writer.error ?? VerificationError.failed("fixture did not finish")
+        }
+    }
+
+    /// Black and white 8 px squares over the whole frame: the highest-contrast pattern a blur can flatten.
+    private static func paintChecker(_ buffer: CVPixelBuffer, width: Int, height: Int) {
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<height {
+            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt32.self)
+            for x in 0..<width { row[x] = ((x / 8) + (y / 8)) % 2 == 0 ? 0xffff_ffff : 0xff00_0000 }
         }
     }
 
@@ -1838,6 +1854,120 @@ struct VerifyExport {
         guard try ExportEdit.load(from: directory, session: session).shortcuts == nil else {
             throw VerificationError.failed("ExportEdit.load kept a disabled shortcut overlay")
         }
+    }
+
+    // MARK: Masks
+
+    /// Luma (0...1) mean, standard deviation and maximum over `region` (normalized, top-left origin) of the frame at `time`.
+    private static func lumaStats(_ asset: AVAsset, time: Double, region: CGRect) async throws -> (mean: Double, std: Double, max: Double) {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let rep = NSBitmapImageRep(cgImage: try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image)
+        let w = Double(rep.pixelsWide), h = Double(rep.pixelsHigh)
+        var values: [Double] = []
+        for y in stride(from: Int(region.minY * h), to: Int(region.maxY * h), by: 2) {
+            for x in stride(from: Int(region.minX * w), to: Int(region.maxX * w), by: 2) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                values.append(0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent)
+            }
+        }
+        guard !values.isEmpty else { throw VerificationError.failed("empty mask measurement region \(region)") }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        return (mean, variance.squareRoot(), values.max() ?? 0)
+    }
+
+    /// Masks on a checkerboard recording (every pixel is black or white, so a blur is unmistakable):
+    /// a sensitive-data mask blurs its rectangle only inside its time range; a highlight mask dims
+    /// everything but its rectangle (80 % black, composited in linear light, so white lands near 0.5); a mask follows a 2x zoom; `masks.json` reaches the export through
+    /// `ExportEdit.load` and the exporter's own sidecar fallback, and an explicit empty configuration overrides it.
+    private static func verifyMasks(root: URL, width: Int, height: Int, duration: Double) async throws {
+        let settings = ExportSettings(fps: 30, height: 720, codec: .h264)
+        func makeSession(_ name: String, events: [CursorEvent]) async throws -> (RecordingSession, URL) {
+            let directory = root.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try await makeFixture(url: directory.appendingPathComponent("raw.mp4"), width: width, height: height,
+                                  duration: duration, checker: true)
+            let session = RecordingSession(id: UUID(), createdAt: Date(), displayID: 1, width: width, height: height,
+                                           duration: duration, events: events, droppedFrames: 0, eventCaptureAvailable: true)
+            try session.save(in: directory)
+            return (session, directory)
+        }
+        func export(_ session: RecordingSession, _ directory: URL, _ name: String, _ edit: ExportEdit?) async throws -> AVURLAsset {
+            let url = directory.appendingPathComponent(name)
+            try await OfflineExporter().export(session: session, directory: directory, destination: url,
+                                               showsClickEffects: false, settings: settings, edit: edit)
+            return AVURLAsset(url: url)
+        }
+        func require(_ condition: Bool, _ message: @autoclosure () -> String) throws {
+            guard condition else { throw VerificationError.failed("masks: \(message())") }
+        }
+
+        let (session, directory) = try await makeSession("mask-session", events: [])
+        // Sensitive data over source rect x 0.25...0.5, y 0.3...0.6 for source seconds 2...4.
+        let rect = CGRect(x: 0.25, y: 0.3, width: 0.25, height: 0.3)
+        let inner = rect.insetBy(dx: 0.04, dy: 0.06)
+        let sensitive = MaskConfiguration(masks: [TimelineMask(sourceStart: 2, sourceEnd: 4, bounds: [rect])])
+        let plain = try await export(session, directory, "mask-plain.mp4", nil)
+        let blurred = try await export(session, directory, "mask-sensitive.mp4", ExportEdit(masks: sensitive))
+        let sharpReference = try await lumaStats(plain, time: 3, region: inner)
+        try require(sharpReference.std > 0.4, "the checkerboard fixture is not high contrast (std \(sharpReference.std))")
+        let inside = try await lumaStats(blurred, time: 3, region: inner)
+        try require(inside.std < 0.12, "sensitive-data mask left the region sharp inside its time range (std \(inside.std))")
+        let beside = try await lumaStats(blurred, time: 3, region: CGRect(x: 0.6, y: 0.3, width: 0.3, height: 0.3))
+        try require(beside.std > 0.4, "sensitive-data mask blurred outside its rectangle (std \(beside.std))")
+        for time in [1.0, 5.0, 7.0] {
+            let outsideTime = try await lumaStats(blurred, time: time, region: inner)
+            try require(outsideTime.std > 0.4, "sensitive-data mask is visible at \(time)s, outside its time range (std \(outsideTime.std))")
+        }
+
+        // Highlight: everything outside x 0.4...0.6, y 0.4...0.6 is dimmed by 0.8, the rectangle is untouched.
+        let highlightRect = CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+        let highlight = MaskConfiguration(masks: [TimelineMask(sourceStart: 2, sourceEnd: 4, bounds: [highlightRect],
+                                                               kind: .highlight, highlightOpacity: 0.8)])
+        let dimmed = try await export(session, directory, "mask-highlight.mp4", ExportEdit(masks: highlight))
+        let dimOutside = try await lumaStats(dimmed, time: 3, region: CGRect(x: 0.05, y: 0.05, width: 0.25, height: 0.25))
+        try require(dimOutside.mean < 0.4 && dimOutside.max < 0.7, "highlight did not darken outside its rectangle (mean \(dimOutside.mean), max \(dimOutside.max))")
+        let dimInside = try await lumaStats(dimmed, time: 3, region: highlightRect.insetBy(dx: 0.03, dy: 0.04))
+        try require(dimInside.std > 0.4 && dimInside.max > 0.8, "highlight darkened pixels inside its rectangle (std \(dimInside.std), max \(dimInside.max))")
+        let undimmed = try await lumaStats(dimmed, time: 1, region: CGRect(x: 0.05, y: 0.05, width: 0.25, height: 0.25))
+        try require(undimmed.mean > 0.45 && undimmed.max > 0.9, "highlight dims outside its time range (mean \(undimmed.mean), max \(undimmed.max))")
+
+        // The editor's explicit empty configuration, ExportEdit.load and the exporter's masks.json fallback.
+        try require(try ExportEdit.load(from: directory, session: session).masks == nil, "ExportEdit.load invented masks without masks.json")
+        try sensitive.save(to: directory)
+        let loaded = try ExportEdit.load(from: directory, session: session)
+        try require(loaded.masks == sensitive && !loaded.isEmpty, "ExportEdit.load ignored masks.json")
+        let fromSidecar = try await export(session, directory, "mask-sidecar.mp4", nil)
+        let sidecarStats = try await lumaStats(fromSidecar, time: 3, region: inner)
+        try require(sidecarStats.std < 0.12, "the exporter ignored masks.json without an explicit edit (std \(sidecarStats.std))")
+        let overridden = try await export(session, directory, "mask-override.mp4", ExportEdit(masks: MaskConfiguration()))
+        let overrideStats = try await lumaStats(overridden, time: 3, region: inner)
+        try require(overrideStats.std > 0.4, "an explicit empty mask configuration did not override masks.json (std \(overrideStats.std))")
+
+        // Zoom: the click at 3 s zooms 2x into the top-right quadrant (source x 0.5...1, y 0...0.5), so a mask over
+        // source x 0.52...0.68, y 0.04...0.2 lands at output x 0.04...0.36, y 0.08...0.4, not where it sits unzoomed.
+        let (zoomSession, zoomDirectory) = try await makeSession("mask-zoom-session", events: [
+            CursorEvent(time: 1.0, x: 0.25, y: 0.25, kind: .move),
+            CursorEvent(time: 3.0, x: 0.75, y: 0.25, kind: .down),
+            CursorEvent(time: 3.08, x: 0.75, y: 0.25, kind: .up),
+            CursorEvent(time: 5.0, x: 0.75, y: 0.75, kind: .move)
+        ])
+        let zoomFrame = ZoomTimeline(session: zoomSession).frame(at: 3.5)
+        try require(abs(zoomFrame.scale - 2) < 0.05 && abs(zoomFrame.centerX - 0.75) < 0.08 && abs(zoomFrame.centerY - 0.25) < 0.08,
+                    "the zoom fixture did not settle at 2x on the top-right quadrant (\(zoomFrame.scale), \(zoomFrame.centerX), \(zoomFrame.centerY))")
+        let zoomRect = CGRect(x: 0.52, y: 0.04, width: 0.16, height: 0.16)
+        let zoomMask = MaskConfiguration(masks: [TimelineMask(sourceStart: 2, sourceEnd: 6, bounds: [zoomRect])])
+        let zoomed = try await export(zoomSession, zoomDirectory, "mask-zoom.mp4", ExportEdit(masks: zoomMask))
+        let mapped = CGRect(x: 0.04, y: 0.08, width: 0.32, height: 0.32)
+        let mappedStats = try await lumaStats(zoomed, time: 3.5, region: mapped.insetBy(dx: 0.05, dy: 0.06))
+        try require(mappedStats.std < 0.12, "the mask did not follow the 2x zoom to the mapped output region (std \(mappedStats.std))")
+        let unzoomedPlace = try await lumaStats(zoomed, time: 3.5, region: CGRect(x: 0.45, y: 0.15, width: 0.4, height: 0.3))
+        try require(unzoomedPlace.std > 0.4, "the mask stayed at its unzoomed output position (std \(unzoomedPlace.std))")
+        let zoomedSharp = try await lumaStats(zoomed, time: 3.5, region: CGRect(x: 0.6, y: 0.55, width: 0.3, height: 0.3))
+        try require(zoomedSharp.std > 0.4, "the mask blurred outside its mapped rectangle under zoom (std \(zoomedSharp.std))")
     }
 
     /// Counts samples (every 4th pixel) whose luma differs by more than 40 inside and outside `region` (top-left pixels).

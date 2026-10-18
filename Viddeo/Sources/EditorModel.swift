@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -15,6 +16,28 @@ struct EditorState: Sendable, Equatable {
     var motionBlurAmount: Double
     /// Click effect type, ripple pull size and tuning (`click-config.json`).
     var clickEffect: ClickEffectConfiguration
+    /// Sensitive-data and highlight masks in source time (`masks.json`).
+    var masks: MaskConfiguration
+}
+
+extension MaskConfiguration {
+    /// Editing rules: finite source times inside `0...duration` (a small slack for rounding), at least
+    /// `TimelineMask.minDuration` long, a normalized non-empty rectangle inside the frame, blur 0...128
+    /// and highlight opacity 0...1. Named apart from any model-side validation.
+    func validateForEditing(duration: Double) throws {
+        let slack = 0.01
+        for mask in masks {
+            guard mask.sourceStart.isFinite, mask.sourceEnd.isFinite, mask.sourceStart >= -slack,
+                  mask.sourceEnd <= duration + slack,
+                  mask.sourceEnd - mask.sourceStart >= TimelineMask.minDuration - slack,
+                  (0...128).contains(mask.blur), (0...1).contains(mask.highlightOpacity),
+                  !mask.bounds.isEmpty, mask.bounds.allSatisfy({ rect in
+                      rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
+                          && rect.minX >= 0 && rect.minY >= 0 && rect.width > 0 && rect.height > 0
+                          && rect.maxX <= 1 + 1e-9 && rect.maxY <= 1 + 1e-9
+                  }) else { throw CursorError.invalidConfiguration }
+        }
+    }
 }
 
 @MainActor
@@ -49,7 +72,8 @@ final class EditorModel {
             webcam: try WebcamConfiguration.load(in: directory),
             shortcuts: try ShortcutOverlayConfiguration.load(in: directory),
             motionBlurAmount: try CursorConfiguration.load(in: directory).motionBlurAmount,
-            clickEffect: try ClickEffectConfiguration.load(in: directory))
+            clickEffect: try ClickEffectConfiguration.load(in: directory),
+            masks: try MaskConfiguration.load(from: directory))
         self.session = session
         self.directory = directory
         self.project = project
@@ -72,7 +96,8 @@ final class EditorModel {
                     ? (state.captions, state.captionConfiguration) : nil,
                    audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam,
                    shortcuts: session.shortcuts.map { ($0, state.shortcuts) },
-                   motionBlurAmount: state.motionBlurAmount, clickEffect: state.clickEffect)
+                   motionBlurAmount: state.motionBlurAmount, clickEffect: state.clickEffect,
+                   masks: state.masks)
     }
 
     /// Failed edits leave both state and history intact.
@@ -89,6 +114,7 @@ final class EditorModel {
             try candidate.webcam.validate()
             try candidate.shortcuts.validate()
             try candidate.clickEffect.validate()
+            try candidate.masks.validateForEditing(duration: session.duration)
             guard (0...1).contains(candidate.motionBlurAmount) else { throw CursorError.invalidConfiguration }
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
@@ -135,6 +161,10 @@ final class EditorModel {
             // Like the cursor sidecar, click-config.json is only created for non-default settings.
             if try state.clickEffect != ClickEffectConfiguration.load(in: directory) {
                 try state.clickEffect.save(in: directory)
+            }
+            // masks.json is only created once there are masks (or to record that they were all removed).
+            if try state.masks != MaskConfiguration.load(from: directory) {
+                try state.masks.save(to: directory)
             }
             try updated.save(to: directory)
             project = updated
@@ -224,6 +254,20 @@ final class EditorModel {
             let report = try speedUp ? $0.timeline.speedUpSilence(chunks: chunks) : $0.timeline.trimSilence(chunks: chunks)
             status = "Edited \(report.affectedChunks) silence ranges; saved \(report.savedPlaybackSeconds.formatted(.number.precision(.fractionLength(1)))) playback seconds."
         }
+    }
+
+    /// Adds a sensitive-data mask over the default rectangle for `initialDuration` seconds from
+    /// `sourceTime`, clamped so it fits the recording; one undoable edit.
+    func addMask(atSource sourceTime: Double) {
+        let duration = session.duration
+        guard duration >= TimelineMask.minDuration else {
+            error = "The recording is too short for a mask."
+            return
+        }
+        let length = min(TimelineMask.initialDuration, duration)
+        let start = min(max(0, sourceTime.isFinite ? sourceTime : 0), duration - length)
+        let bounds = TimelineMask.defaultBounds(recordingSize: CGSize(width: session.width, height: session.height))
+        edit { $0.masks.masks.append(TimelineMask(sourceStart: start, sourceEnd: start + length, bounds: [bounds])) }
     }
 
     func finishOperation() async { await task?.value }

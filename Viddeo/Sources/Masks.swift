@@ -378,7 +378,7 @@ enum MaskRenderer {
         for y in 0..<height {
             for x in 0..<width {
                 // Rect conversion above already maps top-left normalized bounds to CI bottom-left.
-                let localY = Double(y) + 0.5 - Double(box.minY)
+                let localY = Double(height - 1 - y) + 0.5 - Double(box.minY)
                 let px = Double(x) + 0.5 - Double(box.minX)
                 let qx = abs(px - Double(box.width) / 2) - (Double(box.width) / 2 - r)
                 let qy = abs(localY - Double(box.height) / 2) - (Double(box.height) / 2 - r)

@@ -14,7 +14,166 @@ struct VerifyZoom {
         try testInvalidPersistedConfiguration()
         try testExtremeValidSpringStability()
         try testScreenMotionBlurShutter()
-        print("Zoom verification passed: 10 checks")
+        try testSpringSettleEstimates()
+        try testSpringClamp()
+        try testSpringPrecision()
+        try testSpringRetargetAndConfigContinuity()
+        try testSpringDurationFitting()
+        try testVisibleSourceGrouping()
+        try testResolvedVisibleGeometry()
+        try testSpringSamplingOrder()
+        print("Zoom verification passed: 18 checks")
+    }
+
+    private static func testSpringSettleEstimates() throws {
+        // Independent evaluations of the decoded settle estimator, not the live stepper.
+        try expectClose(SpringConfiguration.screen.settleTimeMilliseconds, 1483.3333333333344, "default settle time")
+        try expectClose(SpringConfiguration.presetQ.settleTimeMilliseconds, 483, "Q settle time")
+        try expectClose(SpringConfiguration.instant.settleTimeMilliseconds, 0, "instant settle time")
+        try expectClose(SpringConfiguration.screen.settleTimeMilliseconds, 1483.3333333333344, "cached default estimate")
+        var unclamped = SpringConfiguration.screen
+        unclamped.clamp = false
+        try expectClose(unclamped.settleTimeMilliseconds, SpringConfiguration.screen.settleTimeMilliseconds,
+                        "clamp participates in the cache key but does not affect estimator integration")
+        print("Spring settle estimates: default=\(SpringConfiguration.screen.settleTimeMilliseconds) ms, Q=\(SpringConfiguration.presetQ.settleTimeMilliseconds) ms")
+    }
+
+    private static func testSpringClamp() throws {
+        for target in [-1.0, 1.0] {
+            var spring = Spring(value: 0)
+            spring.setTarget(target)
+            var previous = 0.0
+            for _ in 0..<300 {
+                spring.advance(milliseconds: SpringConfiguration.frameMilliseconds)
+                try expect(target > 0 ? spring.value <= target && spring.value >= previous
+                                      : spring.value >= target && spring.value <= previous,
+                           "a rested target step at 60 fps must approach without crossing its target")
+                previous = spring.value
+            }
+            try expect(spring.isAtRest, "clamped spring must reach exact rest")
+        }
+        var config = SpringConfiguration.screen
+        config.clamp = false
+        var spring = Spring(value: 0, configuration: config)
+        spring.setTarget(1)
+        var peak = 0.0
+        for _ in 0..<120 {
+            spring.advance(milliseconds: SpringConfiguration.frameMilliseconds)
+            peak = max(peak, spring.value)
+        }
+        try expect(peak > 1.1, "disabling adaptive damping preserves underdamped overshoot")
+        // A literal no-crossing clamp would fail this: damping is selected only at advance start.
+        var longStep = Spring(value: 0)
+        longStep.setTarget(1)
+        longStep.advance(milliseconds: 300)
+        try expect(longStep.value > 1, "reference clamp is not an unconditional position clamp")
+    }
+
+    private static func testSpringPrecision() throws {
+        try expectClose(Spring.restTolerance(from: 0, to: 1000, precision: 0.002), 2, "precision scales with distance")
+        try expectClose(Spring.restTolerance(from: 0, to: 0.1, precision: 0.002), 0.002, "precision has a unit-distance floor")
+        try expectClose(Spring.restTolerance(from: 3, to: 3, precision: 0.002), 1, "equal current and target uses the special tolerance")
+        var tiny = Spring(value: 0)
+        tiny.setTarget(0.001)
+        try expect(!tiny.isAtRest, "at-rest getter requires exact target and zero velocity")
+        tiny.advance(milliseconds: 1)
+        try expect(tiny.isAtRest && tiny.value == 0.001 && tiny.velocity == 0, "precision snaps both position and velocity")
+        var moving = Spring(value: 0)
+        moving.setTarget(1)
+        for _ in 0..<8 { moving.advance(milliseconds: SpringConfiguration.frameMilliseconds) }
+        moving.setTarget(moving.value + 0.001)
+        moving.advance(milliseconds: 1)
+        try expect(!moving.isAtRest && abs(moving.velocity) > moving.tolerance,
+                   "small displacement alone cannot mark a fast spring at rest")
+        moving.advance(milliseconds: moving.configuration.settleTimeMilliseconds)
+        try expect(moving.isAtRest, "an advance as large as the settle estimate snaps directly")
+    }
+
+    private static func testSpringRetargetAndConfigContinuity() throws {
+        var spring = Spring(value: 0)
+        spring.setTarget(1)
+        for _ in 0..<6 { spring.advance(milliseconds: SpringConfiguration.frameMilliseconds) }
+        let oldVelocity = spring.velocity, oldValue = spring.value
+        try expect(oldVelocity > 0, "spring must be moving before retarget")
+        spring.setTarget(-0.5)
+        try expect(spring.velocity == oldVelocity && spring.value == oldValue, "retarget must preserve velocity and position exactly")
+        let tolerance = spring.tolerance
+        spring.updateConfiguration(.presetQ)
+        try expect(spring.velocity == oldVelocity && spring.value == oldValue && spring.tolerance == tolerance,
+                   "configuration changes preserve motion and the current target's precision")
+        spring.advance(milliseconds: 1)
+        try expect(spring.value > oldValue && spring.velocity > 0, "reverse retarget keeps existing momentum before reversing")
+        let latchedTolerance = spring.tolerance
+        spring.setTarget(-0.5)
+        try expect(spring.tolerance == latchedTolerance, "an unchanged target must not recompute precision")
+        spring.updateConfiguration(.instant)
+        spring.advance(milliseconds: 1)
+        try expect(spring.isAtRest && spring.value == -0.5, "mass zero snaps on advance")
+    }
+
+    private static func testSpringDurationFitting() throws {
+        let config = SpringConfiguration.screen, settle = config.settleTimeMilliseconds
+        try expect(config.fitted(toDurationMilliseconds: settle) == config, "no fitting when duration already accommodates settling")
+        try expect(config.fitted(toDurationMilliseconds: settle * 2) == config, "long durations do not slow a spring down")
+        try expect(config.fitted(toDurationMilliseconds: 2 * SpringConfiguration.frameMilliseconds) == .instant,
+                   "at most two 60 fps frames uses instant configuration")
+        let fitted = config.fitted(toDurationMilliseconds: settle / 2)
+        try expectClose(fitted.stiffness, config.stiffness * 4, "duration fitting scales stiffness quadratically")
+        try expectClose(fitted.damping, config.damping * 2, "duration fitting scales damping linearly")
+        try expect(fitted.mass == config.mass && fitted.clamp == config.clamp && fitted.precision == config.precision,
+                   "fitting preserves mass, clamp and precision")
+        try expect(SpringConfiguration.instant.fitted(toDurationMilliseconds: 0) == .instant, "already instant config remains instant")
+    }
+
+    private static func testVisibleSourceGrouping() throws {
+        let session = makeSession(duration: 8, events: [event(1, 0.35, 0.5, .down), event(2, 0.55, 0.5, .move)])
+        var calls: [(Double, Double)] = []
+        let landscape = ZoomTimeline(session: session, visibleSourceSize: { time, scale in
+            calls.append((time, scale))
+            return CGSize(width: 960, height: 540) // 16:9 visible source part at the selected zoom
+        })
+        let portrait = ZoomTimeline(session: session, visibleSourceSize: { _, _ in CGSize(width: 303.75, height: 540) }) // 9:16
+        try expect(calls.count == 1 && abs(calls[0].0 - 0.7) < 1e-9 && calls[0].1 == 2,
+                   "geometry is resolved at range start and selected zoom, once per range")
+        try expect(portrait.frame(at: 3.3).centerX - landscape.frame(at: 3.3).centerX > 0.15,
+                   "same trace forms separate horizontal groups in the narrower visible part")
+        try expect(landscape.ranges == portrait.ranges, "geometry changes spatial grouping, not click windows")
+        let invalid = ZoomTimeline(session: session, visibleSourceSize: { _, _ in CGSize(width: Double.nan, height: 0) })
+        try expect(invalid.frame(at: 3.3) == landscape.frame(at: 3.3), "invalid geometry falls back to the legacy full-source viewport")
+    }
+
+    private static func testResolvedVisibleGeometry() throws {
+        let source = CGSize(width: 1920, height: 1080)
+        let landscape = ZoomVisibleGeometry(sourceSize: source, viewportSize: source, unzoomedScreenSize: source)
+        let portrait = ZoomVisibleGeometry(sourceSize: source, viewportSize: CGSize(width: 1080, height: 1920),
+                                          unzoomedScreenSize: CGSize(width: 1080, height: 607.5))
+        try expect(landscape.visibleSourceSize(atZoom: 2) == CGSize(width: 960, height: 540), "landscape zoom visibility")
+        try expect(portrait.visibleSourceSize(atZoom: 2) == CGSize(width: 960, height: 1080), "portrait stage exposes the entire source height")
+        let split = ZoomVisibleGeometry(sourceSize: source, viewportSize: source, unzoomedScreenSize: CGSize(width: 960, height: 540))
+        try expect(split.visibleSourceSize(atZoom: 2) == source, "smaller split pane increases the source visible inside the stage")
+        let padded = ZoomVisibleGeometry(sourceSize: source, viewportSize: source, unzoomedScreenSize: CGSize(width: 1536, height: 864))
+        try expect(padded.visibleSourceSize(atZoom: 2) == CGSize(width: 1200, height: 675), "padding affects the resolved visible source")
+        let session = makeSession(duration: 8, events: [event(1, 0.5, 0.35, .down), event(2, 0.5, 0.7, .move)])
+        let a = ZoomTimeline(session: session, visibleSourceSize: { _, zoom in landscape.visibleSourceSize(atZoom: zoom) })
+        let b = ZoomTimeline(session: session, visibleSourceSize: { _, zoom in portrait.visibleSourceSize(atZoom: zoom) })
+        try expect(a.frame(at: 3.3).centerY - b.frame(at: 3.3).centerY > 0.2,
+                   "resolved portrait output groups the same vertical trace differently")
+    }
+
+    private static func testSpringSamplingOrder() throws {
+        var fractional = Spring(value: 0, configuration: SpringConfiguration(stiffness: 100, damping: 10, mass: 1,
+                                                                             clamp: false, precision: 1e-12))
+        fractional.setTarget(1)
+        fractional.advance(milliseconds: 1.25)
+        // Hand-calculated 1ms then 0.75ms, specifically distinguishing the decoded convention
+        // from a normal remaining-0.25ms integrator.
+        try expect(abs(fractional.value - 0.000230681875) < 1e-12 && abs(fractional.velocity - 0.1742425) < 1e-12,
+                   "nonintegral advances use the observed complement step")
+        let timeline = ZoomTimeline(session: makeSession(duration: 8, events: [event(1, 0.6, 0.5, .down)]))
+        try expectClose(timeline.frame(at: 0.7).scale, 1, "the range-start sample installs the target after advancing")
+        try expect(timeline.frame(at: 0.7 + 1 / 60).scale > 1, "the next sample starts responding")
+        let a = timeline.frame(at: 1), b = timeline.frame(at: 1 + 1 / 60)
+        try expectClose(timeline.frame(at: 1 + 0.5 / 60).scale, (a.scale + b.scale) / 2, "fractional-frame queries interpolate samples")
     }
 
     /// Shutter math of the screen motion blur: same blur extent at any fps, nothing when still,
@@ -193,8 +352,13 @@ struct VerifyZoom {
             times.append(Double(seed % 1_200_000) / 100_000)
         }
         let firstPass = times.map(timeline.frame(at:))
-        let secondPass = times.map(timeline.frame(at:))
-        try expect(firstPass == secondPass, "random-access seeks should return deterministic frames")
+        let secondPass = times.reversed().map(timeline.frame(at:)).reversed()
+        try expect(firstPass == Array(secondPass), "random-access seeks should be independent of query order")
+        let rebuilt = ZoomTimeline(session: makeSession(duration: 9, events: [
+            event(1, 0.2, 0.4, .down), event(2.1, 0.7, 0.6, .move),
+            event(4, 0.8, 0.3, .up), event(6, 0.3, 0.7, .down)
+        ]))
+        try expect(firstPass == times.map(rebuilt.frame(at:)), "independent precomputation produces identical arbitrary seeks")
     }
 
     private static func testSmoothBoundedTransitionsAndReturn() throws {
