@@ -89,6 +89,14 @@ struct ClickEffectConfiguration: Codable, Sendable, Equatable {
         else { throw ClickEffectError.invalidConfiguration }
     }
 
+    /// The reference's declared default for a NEW recording: `clickEffect` is null (off). A missing
+    /// `click-config.json` still means `circle` so sessions recorded before this default keep their look.
+    static var newRecordingDefault: Self {
+        var configuration = Self()
+        configuration.effect = .none
+        return configuration
+    }
+
     /// How long one click of the selected effect stays visible; slots older than this are dropped.
     var visibleDuration: Double {
         switch effect {

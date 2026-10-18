@@ -8,6 +8,12 @@ import ScreenCaptureKit
 @main
 struct VerifyCapture {
     static func main() async throws {
+        let rounded = RecordingSource.evenDimensions(width: 101.9, height: 55.9, scale: 2)
+        try expect(rounded.width == 202 && rounded.height == 110,
+                   "area dimensions should scale to pixels and round down to even values")
+        let capped = RecordingSource.evenDimensions(width: 2000, height: 1600, scale: 2)
+        try expect(capped.width == 2700 && capped.height == 2160,
+                   "area dimensions should preserve aspect ratio under capture limits")
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("viddeo-capture-check-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

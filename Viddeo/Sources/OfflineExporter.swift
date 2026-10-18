@@ -237,7 +237,6 @@ final class OfflineExporter {
             clickTimeline: clickTimeline,
             edit: edit?.timeline,
             stage: try edit?.stage.map { try StageRenderer(style: $0, outputSize: outputSize, baseDirectory: sessionDirectory) },
-            captions: edit?.captions.map { CaptionRenderer(track: $0.track, configuration: $0.configuration, outputSize: outputSize) },
             sourceDuration: actualDuration,
             cursorTimeline: cursorConfiguration.map {
                 CursorTimeline(events: session.events, keystrokes: session.keystrokes ?? [], duration: session.duration,
@@ -256,6 +255,14 @@ final class OfflineExporter {
         }
         let maskConfiguration = try edit?.masks ?? MaskConfiguration.load(from: directory)
         if !maskConfiguration.masks.isEmpty { renderer.masks = MaskTimeline(configuration: maskConfiguration) }
+        if let captions = edit?.captions {
+            // Captions are laid out inside the (inset) stage's screen rect, or the content rect without a
+            // stage (the whole canvas when the output aspect matches the recording): see captions.md.
+            let layoutRect = renderer.stage?.screenRect(contentAspect: Double(session.width) / Double(session.height))
+                ?? renderer.contentRect
+            renderer.captions = CaptionRenderer(track: captions.track, configuration: captions.configuration,
+                                                outputSize: outputSize, layoutRect: layoutRect)
+        }
         if let shortcuts = edit?.shortcuts {
             let contentRect = renderer.stage?.stageRect(contentAspect: Double(session.width) / Double(session.height))
                 ?? renderer.contentRect
@@ -271,8 +278,10 @@ final class OfflineExporter {
                 outputSize: outputSize, contentRect: contentRect, stage: renderer.stage,
                 cutoutQuality: previewWidth == nil ? .balanced : .fast)
         }
-        // Resolve auto-zoom only after stage and split-pane geometry are available.
-        renderer.timeline = ZoomTimeline(session: session, configuration: zoomConfiguration, visibleSourceSize: { [renderer] time, zoom in
+        let zoomItems = try edit?.zoomItems ?? ZoomItemConfiguration.load(from: directory, duration: session.duration)
+        try zoomItems?.validate(duration: session.duration)
+        // Resolve zoom targets only after stage and split-pane geometry are available.
+        renderer.timeline = ZoomTimeline(session: session, configuration: zoomConfiguration, items: zoomItems, visibleSourceSize: { [renderer] time, zoom in
             let screen = renderer.splitScreenLayout(at: time, camera: nil, zoomScale: zoom)
             let rect = screen?.screenPane.flatMap { renderer.stage?.deviceScreenRect(in: $0) } ?? screen?.screen
                 ?? renderer.stage?.screenRect(contentAspect: Double(session.width) / Double(session.height)) ?? renderer.contentRect

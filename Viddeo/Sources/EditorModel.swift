@@ -18,6 +18,8 @@ struct EditorState: Sendable, Equatable {
     var clickEffect: ClickEffectConfiguration
     /// Sensitive-data and highlight masks in source time (`masks.json`).
     var masks: MaskConfiguration
+    /// Persisted source-time zoom items, including explicit removal of every automatic zoom.
+    var zoomItems: ZoomItemConfiguration
 }
 
 extension MaskConfiguration {
@@ -73,7 +75,9 @@ final class EditorModel {
             shortcuts: try ShortcutOverlayConfiguration.load(in: directory),
             motionBlurAmount: try CursorConfiguration.load(in: directory).motionBlurAmount,
             clickEffect: try ClickEffectConfiguration.load(in: directory),
-            masks: try MaskConfiguration.load(from: directory))
+            masks: try MaskConfiguration.load(from: directory),
+            zoomItems: try ZoomItemConfiguration.load(from: directory, duration: session.duration)
+                ?? ZoomTimeline.automaticItems(session: session, configuration: ZoomConfiguration.load(in: directory)))
         self.session = session
         self.directory = directory
         self.project = project
@@ -97,7 +101,7 @@ final class EditorModel {
                    audio: state.audio, webcam: session.webcam == nil ? nil : state.webcam,
                    shortcuts: session.shortcuts.map { ($0, state.shortcuts) },
                    motionBlurAmount: state.motionBlurAmount, clickEffect: state.clickEffect,
-                   masks: state.masks)
+                   masks: state.masks, zoomItems: state.zoomItems)
     }
 
     /// Failed edits leave both state and history intact.
@@ -115,6 +119,7 @@ final class EditorModel {
             try candidate.shortcuts.validate()
             try candidate.clickEffect.validate()
             try candidate.masks.validateForEditing(duration: session.duration)
+            try candidate.zoomItems.validateForEditing(duration: session.duration, preservingLegacyItems: state.zoomItems.items)
             guard (0...1).contains(candidate.motionBlurAmount) else { throw CursorError.invalidConfiguration }
             history.record(candidate, coalescingKey: key, at: ProcessInfo.processInfo.systemUptime)
             state = candidate
@@ -166,6 +171,8 @@ final class EditorModel {
             if try state.masks != MaskConfiguration.load(from: directory) {
                 try state.masks.save(to: directory)
             }
+            // Persist even untouched seeds on the first save; an empty list must never regenerate.
+            try state.zoomItems.save(to: directory, duration: session.duration)
             try updated.save(to: directory)
             project = updated
             savedState = state
@@ -268,6 +275,18 @@ final class EditorModel {
         let start = min(max(0, sourceTime.isFinite ? sourceTime : 0), duration - length)
         let bounds = TimelineMask.defaultBounds(recordingSize: CGSize(width: session.width, height: session.height))
         edit { $0.masks.masks.append(TimelineMask(sourceStart: start, sourceEnd: start + length, bounds: [bounds])) }
+    }
+
+    func addZoom(atSource sourceTime: Double) {
+        edit { try $0.zoomItems.addManual(atSource: sourceTime, duration: session.duration) }
+    }
+
+    func regenerateAutomaticZooms() {
+        edit { state in
+            let early = state.zoomItems.startAnimationEarly
+            state.zoomItems = ZoomTimeline.automaticItems(session: session, configuration: try ZoomConfiguration.load(in: directory))
+            state.zoomItems.startAnimationEarly = early
+        }
     }
 
     func finishOperation() async { await task?.value }

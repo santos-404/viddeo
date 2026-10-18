@@ -86,8 +86,35 @@ struct VerifyClicks {
         try verifyRippleConfiguration()
         try verifyRippleRendering()
         try verifyRippleMath()
+        try verifyNewRecordingDefault(events: events, blank: blank, width: width, height: height)
         print("Ripple verified: config decode/encode/legacy, damped-sine envelope, slot limit, pull scaling, rendered displacement and chromatic split.")
         print("Click effects verified: radius/fade formulas, filled disc and rim, three slots, down-only, filtering, expiry, seek determinism and zoom mapping.")
+    }
+
+    /// New recordings start with the reference's `clickEffect: null` (off); sessions without a
+    /// click-config.json (legacy) keep the circle, and a saved choice always wins.
+    private static func verifyNewRecordingDefault(events: [CursorEvent], blank: CIImage, width: Int, height: Int) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("viddeo-click-new-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        guard try ClickEffectConfiguration.load(in: directory).effect == .circle,
+              ClickEffectConfiguration().effect == .circle else { throw Failure("legacy (no sidecar) default is no longer circle") }
+        let fresh = ClickEffectConfiguration.newRecordingDefault
+        guard fresh.effect == .none, fresh.visibleDuration == 0, (try? fresh.validate()) != nil else {
+            throw Failure("new-recording click default is not an off effect")
+        }
+        try fresh.save(in: directory)
+        guard try ClickEffectConfiguration.load(in: directory) == fresh else { throw Failure("off default did not round-trip") }
+        var other = ClickEffectConfiguration()
+        other.effect = .circle
+        let off = ClickEffectTimeline(events: events, duration: 3, configuration: fresh).image(over: blank, at: 0.5)
+        let on = ClickEffectTimeline(events: events, duration: 3, configuration: other).image(over: blank, at: 0.5)
+        let offPixel = try pixel(off, x: 0.4, y: 0.4, width: width, height: height)
+        let onPixel = try pixel(on, x: 0.4, y: 0.4, width: width, height: height)
+        guard offPixel.0 < 0.01, offPixel.1 < 0.01, offPixel.2 < 0.01, onPixel.0 > 0.05 else {
+            throw Failure("off effect drew a ring (\(offPixel.0)) or circle did not (\(onPixel.0))")
+        }
     }
 
     private static func verifyRippleConfiguration() throws {

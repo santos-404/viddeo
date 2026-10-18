@@ -33,13 +33,15 @@ struct ExportEdit: Sendable {
     /// the session's `masks.json`; an explicit empty configuration (editor with every mask deleted)
     /// overrides the file and renders none.
     var masks: MaskConfiguration?
+    /// Nil reads zoom-items.json (or seeds legacy automatic ranges); an empty list disables zooms.
+    var zoomItems: ZoomItemConfiguration?
 
     init(timeline: TimelineModel? = nil, stage: StageStyle? = nil,
          captions: (track: CaptionTrack, configuration: CaptionConfiguration)? = nil,
          audio: AudioMixConfiguration? = nil, webcam: WebcamConfiguration? = nil,
          shortcuts: (events: [ShortcutEvent], configuration: ShortcutOverlayConfiguration)? = nil,
          motionBlurAmount: Double? = nil, clickEffect: ClickEffectConfiguration? = nil,
-         masks: MaskConfiguration? = nil) {
+         masks: MaskConfiguration? = nil, zoomItems: ZoomItemConfiguration? = nil) {
         self.timeline = timeline
         self.stage = stage
         self.captions = captions
@@ -49,9 +51,10 @@ struct ExportEdit: Sendable {
         self.motionBlurAmount = motionBlurAmount
         self.clickEffect = clickEffect
         self.masks = masks
+        self.zoomItems = zoomItems
     }
 
-    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil && clickEffect == nil && masks == nil }
+    var isEmpty: Bool { timeline == nil && stage == nil && captions == nil && audio == nil && webcam == nil && shortcuts == nil && motionBlurAmount == nil && clickEffect == nil && masks == nil && zoomItems == nil }
 
     /// Whatever the session folder has: `project.json` → its timeline, `stage-config.json` →
     /// the stage, `captions.json` (+ `captions-config.json`, defaults when absent) → captions
@@ -87,6 +90,7 @@ struct ExportEdit: Sendable {
         }
         let masks = try MaskConfiguration.load(from: directory)
         if !masks.masks.isEmpty { edit.masks = masks }
+        edit.zoomItems = try ZoomItemConfiguration.load(from: directory, duration: session.duration)
         return edit
     }
 }

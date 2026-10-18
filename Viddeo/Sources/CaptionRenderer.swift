@@ -51,27 +51,50 @@ struct CaptionRenderer: Sendable {
     let configuration: CaptionConfiguration
     let width: Int
     let height: Int
+    /// The rect captions are laid out in, in Core Image space (origin bottom-left, y up) like
+    /// `StageRenderer` rects. Reference (captions.md, renderer 510,941-513,400): captions live in
+    /// the inset STAGE rect, so this is the stage's screen rect when a stage is present, else the
+    /// content rect, else the whole output. Size and position are relative to it, and it is then
+    /// inset by `CaptionConfiguration.stageInset` of its own width and height.
+    let layoutRect: CGRect
     private let groups: [PreparedGroup]
     private let textColor: (red: Double, green: Double, blue: Double)
     private let backgroundColor: (red: Double, green: Double, blue: Double)
 
-    init(track: CaptionTrack, configuration: CaptionConfiguration, outputSize: CGSize) {
+    init(track: CaptionTrack, configuration: CaptionConfiguration, outputSize: CGSize, layoutRect: CGRect? = nil) {
         let config = (try? configuration.validate()) == nil ? CaptionConfiguration() : configuration
         self.configuration = config
         width = max(1, Int(outputSize.width.rounded()))
         height = max(1, Int(outputSize.height.rounded()))
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        // An empty, non-finite or off-canvas request falls back to the canvas; otherwise it is clipped to it.
+        if let layoutRect, layoutRect.minX.isFinite, layoutRect.minY.isFinite, layoutRect.width.isFinite,
+           layoutRect.height.isFinite, layoutRect.intersection(canvas).width >= 1, layoutRect.intersection(canvas).height >= 1 {
+            self.layoutRect = layoutRect.intersection(canvas)
+        } else {
+            self.layoutRect = canvas
+        }
         textColor = CaptionConfiguration.rgb(config.color) ?? (1, 1, 1)
         backgroundColor = CaptionConfiguration.rgb(config.backgroundColor) ?? (0, 0, 0)
-        let baseSize = config.sizeRatio * Double(height)
-        let stageWidth = Double(width) * (1 - 2 * CaptionConfiguration.stageInset)
+        // Font size follows the layout rect's height (equal to the output height when the rect is
+        // the whole canvas, so unstaged output is unchanged). What the reference's `sizeRatio`
+        // multiplies is not in the evidence; the stage rect is the design choice.
+        let baseSize = config.sizeRatio * Double(self.layoutRect.height)
+        let stageWidth = Double(self.layoutRect.width) * (1 - 2 * CaptionConfiguration.stageInset)
         let groups = config.enabled ? CaptionLayoutPlanner.groups(for: track, configuration: config) : []
         self.groups = groups.map { group in
             let prepared = PreparedGroup(group: group, font: Self.font(config.font, size: baseSize), fontSize: baseSize)
-            let needed = prepared.fullWidth + 2 * prepared.paddingX
-            guard needed > stageWidth, needed > 0 else { return prepared }
-            // Lines wider than the stage shrink rather than leave it.
-            let size = baseSize * stageWidth / needed
-            return PreparedGroup(group: group, font: Self.font(config.font, size: size), fontSize: size)
+            var current = prepared
+            // Lines wider than the stage shrink rather than leave it. System font metrics are not linear in
+            // the size (optical sizing), so one proportional step can still overshoot a small stage rect:
+            // repeat a few times (with a hair of slack after the first) until the line fits.
+            for attempt in 0..<8 {
+                let needed = current.fullWidth + 2 * current.paddingX
+                guard needed > stageWidth, needed > 0 else { break }
+                let size = current.fontSize * stageWidth / needed * (attempt == 0 ? 1 : 0.995)
+                current = PreparedGroup(group: group, font: Self.font(config.font, size: size), fontSize: size)
+            }
+            return current
         }
     }
 
@@ -106,10 +129,11 @@ struct CaptionRenderer: Sendable {
         let visible = prepared.group.visibleWordIndices(at: timeMs, reveal: configuration.wordsReveal)
         guard let first = visible.first, let last = visible.last else { return nil }
 
-        // Place the box in top-left unit space inside the 10 %-inset stage, then flip to Core Graphics.
+        // Place the box in top-left space inside the 10 %-inset layout rect, then flip to Core Graphics.
         let inset = CaptionConfiguration.stageInset
-        let stageX = Double(width) * inset, stageY = Double(height) * inset
-        let stageWidth = Double(width) * (1 - 2 * inset), stageHeight = Double(height) * (1 - 2 * inset)
+        let stageX = Double(layoutRect.minX) + Double(layoutRect.width) * inset
+        let stageY = Double(height) - Double(layoutRect.maxY) + Double(layoutRect.height) * inset
+        let stageWidth = Double(layoutRect.width) * (1 - 2 * inset), stageHeight = Double(layoutRect.height) * (1 - 2 * inset)
         func boxX(forWidth boxWidth: Double) -> Double {
             stageX + configuration.position.x * max(0, stageWidth - boxWidth)
         }

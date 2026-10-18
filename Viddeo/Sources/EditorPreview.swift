@@ -395,6 +395,7 @@ struct EditorPreview: View {
         var showsClickEffects: Bool
         var clickEffect: ClickEffectConfiguration
         var masks: MaskConfiguration
+        var zoomItems: ZoomItemConfiguration
     }
 
     /// Everything that changes the sound: the edit plan and the audio mix. Picture-only settings do not.
@@ -410,7 +411,7 @@ struct EditorPreview: View {
             captions: editor.state.captions, captionConfiguration: editor.state.captionConfiguration,
             webcam: editor.state.webcam, shortcuts: editor.state.shortcuts,
             motionBlurAmount: editor.state.motionBlurAmount, settings: settings, showsClickEffects: showsClickEffects,
-            clickEffect: editor.state.clickEffect, masks: editor.state.masks)
+            clickEffect: editor.state.clickEffect, masks: editor.state.masks, zoomItems: editor.state.zoomItems)
     }
 
     var body: some View {

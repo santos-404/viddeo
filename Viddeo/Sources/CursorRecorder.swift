@@ -24,10 +24,15 @@ final class CursorRecorder {
 
 
     func start(displayID: CGDirectDisplayID, capturesKeystrokes: Bool = false, capturesShortcuts: Bool = false) {
+        start(contentRect: CGDisplayBounds(displayID), capturesKeystrokes: capturesKeystrokes,
+              capturesShortcuts: capturesShortcuts)
+    }
+
+    func start(contentRect: CGRect, capturesKeystrokes: Bool = false, capturesShortcuts: Bool = false) {
         stopTap()
         self.capturesKeystrokes = capturesKeystrokes
         self.capturesShortcuts = capturesShortcuts
-        storage.reset(bounds: CGDisplayBounds(displayID), capturesKeystrokes: capturesKeystrokes,
+        storage.reset(bounds: contentRect, capturesKeystrokes: capturesKeystrokes,
                       initialLocation: CGEvent(source: nil)?.location, capturesShortcuts: capturesShortcuts)
         tapWasAvailableAtStart = false
 
@@ -74,6 +79,8 @@ final class CursorRecorder {
     func stopCapture() {
         stopTap()
     }
+
+    func updateContentRect(_ rect: CGRect) { storage.updateBounds(rect) }
 
     func events(through duration: Double) -> [CursorEvent] {
         storage.events(through: duration)
@@ -151,6 +158,12 @@ final class CursorEventStorage: @unchecked Sendable {
         lock.unlock()
     }
 
+    func updateBounds(_ newBounds: CGRect) {
+        lock.lock()
+        bounds = newBounds
+        lock.unlock()
+    }
+
     func setAnchor(hostSeconds: Double) {
         lock.lock()
         if anchorHostSeconds == nil {
@@ -218,10 +231,11 @@ final class CursorEventStorage: @unchecked Sendable {
             return
         }
 
+        guard let normalized = CursorCoordinateMapping.normalized(location, in: bounds, pixelScale: 1) else { return }
         rawEvents.append(RawEvent(
             hostSeconds: hostSeconds,
-            x: Double((location.x - bounds.minX) / bounds.width),
-            y: Double((location.y - bounds.minY) / bounds.height),
+            x: Double(normalized.x),
+            y: Double(normalized.y),
             kind: kind
         ))
     }

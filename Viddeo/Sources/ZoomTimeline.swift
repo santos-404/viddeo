@@ -154,33 +154,25 @@ struct ZoomTimeline: Sendable {
     /// no closure or renderer state survives in the immutable sample table. Nil preserves the
     /// legacy full-source viewport for callers without resolved geometry.
     init(session: RecordingSession, configuration: ZoomConfiguration = .init(),
+         items: ZoomItemConfiguration? = nil,
          visibleSourceSize: ((Double, Double) -> CGSize)? = nil) {
         // Export validates user configuration; pure callers get safe defaults.
         let config = (try? configuration.validate()) == nil ? ZoomConfiguration() : configuration
         fps = config.framesPerSecond
         let duration = session.duration.isFinite ? min(12 * 60 * 60, max(0, session.duration)) : 0
-        let events = session.events.filter {
-            $0.time.isFinite && $0.x.isFinite && $0.y.isFinite &&
-            $0.time >= 0 && $0.time <= duration &&
-            (0...1).contains($0.x) && (0...1).contains($0.y)
-        }.sorted { $0.time < $1.time }
-        var merged: [ZoomRange] = []
-        for event in events where event.kind != .move && event.time < duration - config.ignoreFinalSeconds {
-            let start = max(0.001, floor(event.time * 1000) / 1000 - config.beforeClick)
-            let end = min(floor(event.time * 1000) / 1000 + config.afterClick, duration - config.tailMargin)
-            guard end > start else { continue }
-            if let previous = merged.last, start <= previous.end + config.mergeGap {
-                merged[merged.count - 1].end = max(previous.end, end)
-            } else {
-                merged.append(ZoomRange(start: start, end: end))
-            }
-        }
-        ranges = merged
-        let groups = merged.map { range in
-            let fallback = CGSize(width: Double(session.width) / config.scale, height: Double(session.height) / config.scale)
-            let resolved = visibleSourceSize?(range.start, config.scale) ?? fallback
+        let events = Self.validEvents(session: session, duration: duration)
+        let requested = items ?? Self.automaticItems(session: session, configuration: config)
+        let resolvedItems = (try? requested.validate(duration: duration)) == nil ? ZoomItemConfiguration() : requested
+        let ordered = resolvedItems.items.sorted { $0.sourceStart < $1.sourceStart }
+        let enabled = ordered.filter { !$0.isDisabled }
+        ranges = enabled.map { ZoomRange(start: $0.sourceStart, end: $0.sourceEnd) }
+        let groups = enabled.map { item -> [Group] in
+            if item.mode == .manual { return [Group(start: item.sourceStart, x: item.centerX, y: item.centerY)] }
+            let fallback = CGSize(width: Double(session.width) / item.scale, height: Double(session.height) / item.scale)
+            let resolved = visibleSourceSize?(item.sourceStart, item.scale) ?? fallback
             let valid = resolved.width.isFinite && resolved.height.isFinite && resolved.width > 0 && resolved.height > 0
-            return Self.groups(events: events, range: range, session: session, visibleSourceSize: valid ? resolved : fallback)
+            return Self.groups(events: events, range: ZoomRange(start: item.sourceStart, end: item.sourceEnd),
+                               session: session, visibleSourceSize: valid ? resolved : fallback)
         }
         let springConfig = SpringConfiguration(stiffness: config.stiffness, damping: config.damping, mass: config.mass)
         var x = Spring(value: 0.5, configuration: springConfig)
@@ -189,14 +181,19 @@ struct ZoomTimeline: Sendable {
         var samples: [ZoomFrame] = []
         var rangeIndex = 0
         let stepMilliseconds = 1000 / fps
+        let maximumScale = enabled.map(\.scale).max() ?? 1
+        let leadIn = resolvedItems.startAnimationEarly ? 0.35 : 0
+        let instant = enabled.filter(\.hasInstantAnimation)
+        var instantIndex = 0
         let count = Int(ceil(duration * fps)) + 1
         for index in 0..<count {
             let time = Double(index) / fps
-            while rangeIndex < merged.count && time > merged[rangeIndex].end { rangeIndex += 1 }
-            let active = rangeIndex < merged.count && time >= merged[rangeIndex].start
+            while rangeIndex < enabled.count && time > enabled[rangeIndex].sourceEnd { rangeIndex += 1 }
+            let active = rangeIndex < enabled.count && time >= enabled[rangeIndex].sourceStart
+                - (enabled[rangeIndex].hasInstantAnimation ? 0 : leadIn)
             let candidates = active ? groups[rangeIndex] : []
             let group = candidates.last(where: { $0.start <= time }) ?? candidates.first
-            let targetScale = group == nil ? 1 : config.scale
+            let targetScale = group == nil ? 1 : enabled[rangeIndex].scale
             let targetX = group?.x ?? 0.5
             let targetY = group?.y ?? 0.5
             if index > 0 {
@@ -209,13 +206,48 @@ struct ZoomTimeline: Sendable {
             x.setTarget(targetX)
             y.setTarget(targetY)
             scale.setTarget(targetScale)
-            let visibleScale = min(config.scale, max(1, scale.value))
+            while instantIndex < instant.count && time > instant[instantIndex].sourceEnd + 0.05 { instantIndex += 1 }
+            let motion = instantIndex < instant.count && time >= instant[instantIndex].sourceStart
+                ? SpringConfiguration.instant : springConfig
+            x.updateConfiguration(motion)
+            y.updateConfiguration(motion)
+            scale.updateConfiguration(motion)
+            let visibleScale = min(maximumScale, max(1, scale.value))
             let margin = 0.5 / visibleScale
             samples.append(ZoomFrame(time: time, scale: visibleScale,
                                      centerX: min(1 - margin, max(margin, x.value)),
                                      centerY: min(1 - margin, max(margin, y.value))))
         }
         frames = samples
+    }
+
+    /// Generates ranges only; targets are resolved later using each renderer's visible geometry.
+    static func automaticItems(session: RecordingSession, configuration: ZoomConfiguration = .init()) -> ZoomItemConfiguration {
+        let config = (try? configuration.validate()) == nil ? ZoomConfiguration() : configuration
+        let duration = session.duration.isFinite ? min(12 * 60 * 60, max(0, session.duration)) : 0
+        let events = validEvents(session: session, duration: duration)
+        var merged: [ZoomRange] = []
+        for event in events where event.kind != .move && event.time < duration - config.ignoreFinalSeconds {
+            let start = max(0.001, floor(event.time * 1000) / 1000 - config.beforeClick)
+            let end = min(floor(event.time * 1000) / 1000 + config.afterClick, duration - config.tailMargin)
+            guard end > start else { continue }
+            if let previous = merged.last, start <= previous.end + config.mergeGap {
+                merged[merged.count - 1].end = max(previous.end, end)
+            } else {
+                merged.append(ZoomRange(start: start, end: end))
+            }
+        }
+        return ZoomItemConfiguration(items: merged.map {
+            ZoomItem(sourceStart: $0.start, sourceEnd: $0.end, scale: config.scale)
+        })
+    }
+
+    private static func validEvents(session: RecordingSession, duration: Double) -> [CursorEvent] {
+        session.events.filter {
+            $0.time.isFinite && $0.x.isFinite && $0.y.isFinite &&
+            $0.time >= 0 && $0.time <= duration &&
+            (0...1).contains($0.x) && (0...1).contains($0.y)
+        }.sorted { $0.time < $1.time }
     }
 
     func frame(at time: Double) -> ZoomFrame {

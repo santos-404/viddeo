@@ -241,6 +241,101 @@ struct VerifyEditor {
         try check(try ExportEdit.load(from: maskDirectory, session: session).masks == nil, "no masks, no export masks")
         reopenedMasks.undo()
         try check(reopenedMasks.state.masks == editedMask.masks, "mask delete undo")
+        // New-recording defaults versus legacy sessions: the recording flow writes the default sidecars at
+        // finish time (`StageStyle.writeNewRecordingDefault`, `ClickEffectConfiguration.newRecordingDefault`).
+        let fresh = FileManager.default.temporaryDirectory.appendingPathComponent("viddeo-editor-new-\(UUID())")
+        let legacy = FileManager.default.temporaryDirectory.appendingPathComponent("viddeo-editor-legacy-\(UUID())")
+        for url in [fresh, legacy] { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+        defer { for url in [fresh, legacy] { try? FileManager.default.removeItem(at: url) } }
+        try StageStyle.writeNewRecordingDefault(in: fresh)
+        try ClickEffectConfiguration.newRecordingDefault.save(in: fresh)
+        let newEditor = try EditorModel(session: session, directory: fresh)
+        try check(newEditor.state.stageEnabled && newEditor.exportEdit.stage?.cornerRadius == 0
+                  && newEditor.exportEdit.stage?.paddingRatio == 0.1 && newEditor.exportEdit.stage?.background == .wallpaper("graphite"),
+                  "new recording starts on a stage: padding 0.1, radius 0, procedural system background")
+        try check(newEditor.state.clickEffect.effect == .none && newEditor.exportEdit.clickEffect?.effect == ClickEffectType.none,
+                  "new recording starts with click effect off")
+        try check(try ExportEdit.load(from: fresh, session: session).stage?.cornerRadius == 0, "sidecar loader gives a new recording its stage")
+        let legacyEditor = try EditorModel(session: session, directory: legacy)
+        try check(!legacyEditor.state.stageEnabled && legacyEditor.exportEdit.stage == nil
+                  && legacyEditor.state.stage.cornerRadius == 16 && legacyEditor.state.clickEffect.effect == .circle,
+                  "legacy session (no sidecars) stays bare with radius 16 and circle clicks")
+        try check(try ExportEdit.load(from: legacy, session: session).stage == nil, "sidecar loader leaves a legacy session bare")
+        // A legacy sidecar written before radius/background keys existed keeps 16 and the observed gradient.
+        try Data("{\"paddingRatio\":0.2}".utf8).write(to: legacy.appendingPathComponent("stage-config.json"))
+        let legacyStaged = try EditorModel(session: session, directory: legacy)
+        try check(legacyStaged.state.stageEnabled && legacyStaged.state.stage.cornerRadius == 16
+                  && legacyStaged.state.stage.background == .standard, "legacy stage sidecar keeps its old defaults")
+        // A saved choice wins: saved project.json with the stage off stays off even beside the default sidecars.
+        newEditor.edit { $0.stageEnabled = false; $0.clickEffect.effect = .ripple }
+        try check(newEditor.save(presetID: "custom-preset"), "new recording saves")
+        let savedNew = try EditorModel(session: session, directory: fresh)
+        try check(!savedNew.state.stageEnabled && savedNew.state.clickEffect.effect == .ripple, "saved choices are kept on reopen")
+        // Zoom items: legacy seeds, unsaved exports, split/add, undo/redo, atomic sidecar, reload and explicit empty.
+        let zoomDirectory = directory.appendingPathComponent("zoom-session")
+        try FileManager.default.createDirectory(at: zoomDirectory, withIntermediateDirectories: true)
+        var zoomSession = session
+        zoomSession.events = [CursorEvent(time: 2, x: 0.7, y: 0.3, kind: .down)]
+        try zoomSession.save(in: zoomDirectory)
+        let zoomEditor = try EditorModel(session: zoomSession, directory: zoomDirectory)
+        try check(zoomEditor.state.zoomItems.items.count == 1 && zoomEditor.state.zoomItems.items[0].mode == .autoFollow,
+                  "legacy editor seeds automatic zoom items")
+        try check(!FileManager.default.fileExists(atPath: zoomDirectory.appendingPathComponent(ZoomItemConfiguration.filename).path),
+                  "opening legacy zooms writes nothing")
+        let beforeZoom = zoomEditor.state
+        zoomEditor.addZoom(atSource: 2.5)
+        try check(zoomEditor.state.zoomItems.items.count == 2 && zoomEditor.state.zoomItems.items[1].sourceStart == 2.5
+                  && zoomEditor.state.zoomItems.items[1].mode == .manual, "add zoom at playhead splits the automatic item")
+        zoomEditor.undo()
+        try check(zoomEditor.state == beforeZoom, "zoom insertion undo restores original seed and identity")
+        zoomEditor.redo()
+        zoomEditor.edit {
+            $0.zoomItems.items[1].centerX = 0.3; $0.zoomItems.items[1].centerY = 0.7
+            $0.zoomItems.items[1].scale = 3; $0.zoomItems.items[1].hasInstantAnimation = true
+            $0.zoomItems.startAnimationEarly = true
+        }
+        let editedZoom = zoomEditor.state
+        try check(zoomEditor.exportEdit.zoomItems == editedZoom.zoomItems, "unsaved manual zoom reaches export")
+        zoomEditor.edit { $0.zoomItems.items[1].sourceEnd = 9 }
+        try check(zoomEditor.state == editedZoom && zoomEditor.error != nil, "invalid zoom range rolls back")
+        zoomEditor.edit { $0.zoomItems.items[0].sourceEnd = $0.zoomItems.items[0].sourceStart + 0.01 }
+        try check(zoomEditor.state == editedZoom && zoomEditor.error != nil, "automatic range edits enforce 100 ms minimum")
+        zoomEditor.edit { $0.zoomItems.items[1].centerY = 2 }
+        try check(zoomEditor.state == editedZoom && zoomEditor.error != nil, "invalid manual center rolls back")
+        zoomEditor.edit { $0.zoomItems.items[1].sourceStart = 1 }
+        try check(zoomEditor.state == editedZoom && zoomEditor.error != nil, "overlapping zoom ranges roll back")
+        try check(zoomEditor.save(presetID: "custom-preset"), "manual zoom saved")
+        try check(try ZoomItemConfiguration.load(from: zoomDirectory, duration: session.duration) == editedZoom.zoomItems,
+                  "zoom-items.json preserves manual center, scale, IDs and animation flags")
+        try check(try ExportEdit.load(from: zoomDirectory, session: zoomSession).zoomItems == editedZoom.zoomItems,
+                  "ExportEdit loader reads persisted zoom items")
+        let reopenedZoom = try EditorModel(session: zoomSession, directory: zoomDirectory)
+        try check(reopenedZoom.state.zoomItems == editedZoom.zoomItems && !reopenedZoom.canUndo && !reopenedZoom.isDirty,
+                  "reload restores zoom edits with fresh history")
+        reopenedZoom.edit { $0.zoomItems.items[1].isDisabled = true }
+        try check(reopenedZoom.exportEdit.zoomItems?.items[1].isDisabled == true, "zoom enable toggle reaches export")
+        reopenedZoom.undo()
+        try check(reopenedZoom.state.zoomItems == editedZoom.zoomItems, "zoom toggle undo")
+        reopenedZoom.regenerateAutomaticZooms()
+        try check(reopenedZoom.state.zoomItems.items.count == 1 && reopenedZoom.state.zoomItems.items[0].mode == .autoFollow,
+                  "regenerate replaces edited zooms")
+        reopenedZoom.undo()
+        try check(reopenedZoom.state.zoomItems == editedZoom.zoomItems, "regenerate is undoable")
+        reopenedZoom.edit { $0.zoomItems.items.removeAll() }
+        try check(reopenedZoom.exportEdit.zoomItems?.items.isEmpty == true, "unsaved empty zoom list overrides persisted zooms")
+        try check(reopenedZoom.save(presetID: "custom-preset"), "empty zoom list saved")
+        try check(try EditorModel(session: zoomSession, directory: zoomDirectory).state.zoomItems.items.isEmpty,
+                  "reload never reseeds an explicit empty list")
+        try check(try ExportEdit.load(from: zoomDirectory, session: zoomSession).zoomItems?.items.isEmpty == true,
+                  "explicit empty list survives ExportEdit loader")
+        let zoomSaved = try Data(contentsOf: zoomDirectory.appendingPathComponent(ViddeoProject.filename))
+        try FileManager.default.removeItem(at: zoomDirectory.appendingPathComponent(ZoomItemConfiguration.filename))
+        try FileManager.default.createDirectory(at: zoomDirectory.appendingPathComponent(ZoomItemConfiguration.filename), withIntermediateDirectories: true)
+        reopenedZoom.undo()
+        try check(!reopenedZoom.save(presetID: "custom-preset") && reopenedZoom.isDirty && reopenedZoom.error != nil,
+                  "failed zoom sidecar save keeps edits dirty")
+        try check(try Data(contentsOf: zoomDirectory.appendingPathComponent(ViddeoProject.filename)) == zoomSaved,
+                  "project is never saved before zoom sidecar succeeds")
         // Refuse damaged/newer project files instead of silently resetting edits.
         try Data("{\"version\":99}".utf8).write(to: directory.appendingPathComponent("project.json"))
         do {

@@ -32,6 +32,14 @@ struct VerifyEvents {
         try check(keys.count == 2 && abs(keys[0].time - 0.3) < 1e-9 && keys[1].time == 1, "clock anchor, range filtering and keys independent of pointer location")
         try check(storage.events(through: 4) == [CursorEvent(time: 0, x: 0.5, y: 0.5, kind: .move),
                                                 CursorEvent(time: 1.5, x: 0.5, y: 0.5, kind: .down)], "latest pre-epoch position and display filtering")
+        let area = CGRect(x: -900, y: -100, width: 400, height: 200)
+        let areaPoint = CursorCoordinateMapping.normalized(CGPoint(x: -700, y: 0), in: area, pixelScale: 2)
+        try check(areaPoint == CGPoint(x: 0.5, y: 0.5), "area coordinates map from a negative-origin display at Retina scale")
+        let window = CGRect(x: -850, y: -150, width: 800, height: 600)
+        let windowPoint = CursorCoordinateMapping.normalized(CGPoint(x: -650, y: 150), in: window, pixelScale: 2)
+        try check(windowPoint == CGPoint(x: 0.25, y: 0.5), "window coordinates map at Retina scale on a negative-origin display")
+        try check(CursorCoordinateMapping.normalized(CGPoint(x: 0, y: 0), in: area, pixelScale: 2) == nil,
+                   "pointer events outside selected content are excluded")
         try check(!storage.isTapDisabled, "healthy monitoring")
         storage.markTapDisabled()
         try check(storage.isTapDisabled, "interrupted monitoring diagnostics")
@@ -42,6 +50,17 @@ struct VerifyEvents {
         let legacy = try JSONEncoder().encode(session)
         let loaded = try JSONDecoder().decode(RecordingSession.self, from: legacy)
         try check(loaded.cursorEmbedded == nil && loaded.keystrokes == nil, "legacy sessions keep embedded cursor and absent key stream")
+        let source = RecordingSource(kind: .area, displayID: 4, windowID: nil, x: -900, y: -100,
+                                     width: 400, height: 200, pixelScale: 2)
+        session.recordingSource = source
+        let sourceRoundtrip = try JSONDecoder().decode(RecordingSession.self,
+                                                       from: JSONEncoder().encode(session))
+        try check(sourceRoundtrip.recordingSource == source, "recording source geometry roundtrips")
+        var legacyObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session)) as! [String: Any]
+        legacyObject.removeValue(forKey: "recordingSource")
+        let legacyWithoutSource = try JSONDecoder().decode(RecordingSession.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject))
+        try check(legacyWithoutSource.recordingSource == nil, "legacy JSON without source decodes as display")
         session.cursorEmbedded = false
         session.keystrokes = keys
         session.keystrokeCaptureAvailable = true

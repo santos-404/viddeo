@@ -129,6 +129,27 @@ struct StageStyle: Codable, Sendable, Equatable {
         deviceMockup = try c.decodeIfPresent(DeviceMockupConfiguration.self, forKey: .deviceMockup) ?? DeviceMockupConfiguration()
     }
 
+    /// Name of viddeo's own procedural wallpaper used as the "system" background of a new recording.
+    static let newRecordingWallpaper = "graphite"
+
+    /// The reference's declared defaults for a NEW display recording (stage-styles.md): output padding
+    /// 0.1, `screenBorderRadius` 0 (full-display recordings; 16 only for window/area/external), the
+    /// shadow {0.3, 25, 45 degrees, 20, directional}, inset size 0, blur 0, and a `system` background.
+    /// Design choice: the original's default is a bundled macOS wallpaper whose assets are not copied,
+    /// so viddeo uses its own dark procedural wallpaper (`graphite`, the nearest to the dark default).
+    /// Aspect `auto` means the export preset's own aspect, so there is nothing to store here.
+    /// `StageStyle()` itself stays at radius 16 for sessions that predate this default.
+    static let newRecordingDefault = StageStyle(paddingRatio: 0.1, cornerRadius: 0, background: .wallpaper(newRecordingWallpaper))
+
+    /// Writes `newRecordingDefault` as `stage-config.json`. The recording flow calls this when a capture finishes,
+    /// and that is how a NEW recording is told apart from a legacy one: the editor enables the stage when
+    /// `project.json` says so or, absent that flag, when `stage-config.json` exists. A brand-new session has no
+    /// `project.json`, so the sidecar switches the stage on, while a legacy session (no sidecar, or a saved
+    /// `stageEnabled`) is read exactly as before, and nothing here changes `StageStyle()` or the decoder defaults.
+    static func writeNewRecordingDefault(in directory: URL) throws {
+        try newRecordingDefault.save(in: directory)
+    }
+
     static let referenceHeight = 1080.0
     static let wallpaperNames = ["aurora", "dusk", "mint", "graphite"]
 

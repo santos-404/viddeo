@@ -7,7 +7,7 @@ mkdir -p .build
 VIDDEO_TARGET="$(uname -m)-apple-macosx26.0"
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Scripts/verify-zoom.swift -o .build/verify-zoom
 .build/verify-zoom
 
@@ -18,7 +18,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-capture
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -77,7 +77,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-webcam
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -100,7 +100,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-cursor
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -118,7 +118,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-events
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \
@@ -131,7 +131,7 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-preview
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomTimeline.swift \
+  Viddeo/Sources/RecordingSession.swift Viddeo/Sources/Spring.swift Viddeo/Sources/ZoomItems.swift Viddeo/Sources/ZoomTimeline.swift \
   Viddeo/Sources/ClickEffects.swift Viddeo/Sources/ExportPreset.swift Viddeo/Sources/GifExporter.swift \
   Viddeo/Sources/CursorModel.swift Viddeo/Sources/CursorRenderer.swift \
   Viddeo/Sources/ShortcutOverlay.swift Viddeo/Sources/OfflineExporter.swift Viddeo/Sources/ExportEdit.swift Viddeo/Sources/ExportAudio.swift Viddeo/Sources/AudioProcessing.swift Viddeo/Sources/ClickSounds.swift \

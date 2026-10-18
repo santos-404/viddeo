@@ -9,6 +9,14 @@ struct RecordingView: View {
             Text("Viddeo")
                 .font(.largeTitle)
 
+            Picker("Recording source", selection: $viewModel.recordingSourceKind) {
+                Text("Display").tag(RecordingSourceKind.display)
+                Text("Window").tag(RecordingSourceKind.window)
+                Text("Area").tag(RecordingSourceKind.area)
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.isBusy)
+
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Display")
@@ -30,6 +38,30 @@ struct RecordingView: View {
                 }
                 .labelsHidden()
                 .disabled(viewModel.displays.isEmpty || viewModel.isBusy)
+            }
+
+            if viewModel.recordingSourceKind == .window {
+                Picker("Window", selection: $viewModel.selectedWindowID) {
+                    Text("Select a window").tag(CGWindowID?.none)
+                    ForEach(viewModel.windows) { window in
+                        Text(window.description).tag(Optional(window.id))
+                    }
+                }
+                .disabled(viewModel.windows.isEmpty || viewModel.isBusy)
+            } else if viewModel.recordingSourceKind == .area {
+                Text("Area on the selected display, in points from its top-left corner")
+                    .font(.caption).foregroundStyle(.secondary)
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    GridRow {
+                        numberField("X", value: $viewModel.areaX)
+                        numberField("Y", value: $viewModel.areaY)
+                    }
+                    GridRow {
+                        numberField("Width", value: $viewModel.areaWidth)
+                        numberField("Height", value: $viewModel.areaHeight)
+                    }
+                }
+                .disabled(viewModel.isBusy)
             }
 
             HStack {
@@ -142,6 +174,15 @@ struct RecordingView: View {
         }
         .task {
             await viewModel.refreshDisplays()
+        }
+    }
+
+    private func numberField(_ label: String, value: Binding<Double>) -> some View {
+        HStack {
+            Text(label).frame(width: 48, alignment: .leading)
+            TextField(label, value: value, format: .number.precision(.fractionLength(0...2)))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 110)
         }
     }
 }

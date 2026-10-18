@@ -36,6 +36,8 @@ final class ScreenRecorder {
     private var directory: URL?
     private var displayID: UInt32?
     private var dimensions: (width: Int, height: Int)?
+    private var recordingSource: RecordingSource?
+    private var windowTrackingTask: Task<Void, Never>?
     private var createdAt: Date?
     private var generation: UInt64 = 0
     private var currentGeneration: UInt64?
@@ -53,11 +55,37 @@ final class ScreenRecorder {
 
     /// The camera is optional: it starts after the screen stream, so a missing device or denied
     /// permission never prevents or delays the screen recording, and is reported in `webcamWarning`.
-    func start(display: SCDisplay, directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false,
+    func start(display: SCDisplay, window: SCWindow? = nil, areaRect: CGRect? = nil,
+               directory: URL, capturesSystemAudio: Bool = false, capturesMicrophone: Bool = false,
                rendersCursor: Bool = false, capturesKeystrokes: Bool = false, capturesShortcuts: Bool = false,
                capturesWebcam: Bool = false, webcamDeviceID: String? = nil) async throws {
         guard stream == nil, !isStarting, !isStopping else { throw RecorderError.alreadyRecording }
-        let dimensions = try Self.captureDimensions(displayID: display.displayID)
+        guard !(window != nil && areaRect != nil) else { throw RecorderError.invalidDimensions }
+        let displayBounds = CGDisplayBounds(display.displayID)
+        let displayScale = Double(CGDisplayPixelsWide(display.displayID)) / max(1, displayBounds.width)
+        let kind: RecordingSourceKind = window != nil ? .window : (areaRect != nil ? .area : .display)
+        let contentRect: CGRect
+        let captureLocalRect: CGRect?
+        if let window {
+            contentRect = window.frame
+            captureLocalRect = nil
+        } else if let areaRect {
+            contentRect = CGRect(x: displayBounds.minX + areaRect.minX, y: displayBounds.minY + areaRect.minY,
+                                 width: areaRect.width, height: areaRect.height).intersection(displayBounds)
+            captureLocalRect = CGRect(x: contentRect.minX - displayBounds.minX,
+                                      y: contentRect.minY - displayBounds.minY,
+                                      width: contentRect.width, height: contentRect.height)
+        } else {
+            contentRect = displayBounds
+            captureLocalRect = nil
+        }
+        guard contentRect.width >= 2, contentRect.height >= 2 else { throw RecorderError.invalidDimensions }
+        let dimensions = kind == .display ? try Self.captureDimensions(displayID: display.displayID)
+            : RecordingSource.evenDimensions(width: contentRect.width, height: contentRect.height, scale: displayScale)
+        guard dimensions.width > 0, dimensions.height > 0 else { throw RecorderError.invalidDimensions }
+        let source = RecordingSource(kind: kind, displayID: display.displayID, windowID: window?.windowID,
+                                     x: contentRect.minX, y: contentRect.minY,
+                                     width: contentRect.width, height: contentRect.height, pixelScale: displayScale)
         isStarting = true
         if capturesMicrophone {
             let status = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -104,15 +132,17 @@ final class ScreenRecorder {
                 configuration.sampleRate = 48_000
                 configuration.channelCount = 2
             }
-            cursorRecorder.start(displayID: display.displayID, capturesKeystrokes: capturesKeystrokes,
+            cursorRecorder.start(contentRect: contentRect, capturesKeystrokes: capturesKeystrokes,
                                  capturesShortcuts: capturesShortcuts)
             cursorEmbedded = !rendersCursor || !cursorRecorder.isAvailable
             capturesTyping = capturesKeystrokes
             self.capturesShortcuts = capturesShortcuts
             configuration.showsCursor = cursorEmbedded
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+            if let captureLocalRect { configuration.sourceRect = captureLocalRect }
 
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let filter = window.map { SCContentFilter(desktopIndependentWindow: $0) }
+                ?? SCContentFilter(display: display, excludingWindows: [])
             let output = ScreenStreamOutput(pipeline: pipeline) { [weak self] error in
                 Task { @MainActor in await self?.handleCaptureFailure(error, generation: startGeneration) }
             }
@@ -137,6 +167,7 @@ final class ScreenRecorder {
             self.directory = directory
             self.displayID = display.displayID
             self.dimensions = dimensions
+            self.recordingSource = source
             self.createdAt = Date()
             self.audioOptions = (capturesSystemAudio, capturesMicrophone)
 
@@ -146,6 +177,21 @@ final class ScreenRecorder {
             }
             if let pendingCaptureFailure { throw pendingCaptureFailure }
             isStarting = false
+            if let window {
+                // Best-effort frame tracking: pointer events between polls use the last sampled frame.
+                windowTrackingTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .milliseconds(250)) } catch { break }
+                        guard let self else { break }
+                        do {
+                            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                            if let current = content.windows.first(where: { $0.windowID == window.windowID }) {
+                                self.cursorRecorder.updateContentRect(current.frame)
+                            }
+                        } catch { /* Keep the last known frame if enumeration is temporarily unavailable. */ }
+                    }
+                }
+            }
             if webcamAuthorized {
                 do {
                     try await webcamRecorder.start(directory: directory, epoch: nil, deviceID: webcamDeviceID)
@@ -165,9 +211,11 @@ final class ScreenRecorder {
     func stop() async throws -> RecordingSession {
         guard !isStarting, !isStopping else { throw RecorderError.inactive }
         guard let stream, let pipeline, let directory, let displayID,
-              let dimensions, let createdAt else { throw RecorderError.inactive }
+              let dimensions, let createdAt, let recordingSource else { throw RecorderError.inactive }
         guard let stopGeneration = currentGeneration else { throw RecorderError.inactive }
         isStopping = true
+        windowTrackingTask?.cancel()
+        windowTrackingTask = nil
         let stopTime = CMSyncGetTime(CMClockGetHostTimeClock())
         cursorRecorder.stopCapture()
 
@@ -196,7 +244,8 @@ final class ScreenRecorder {
                 keystrokeCaptureAvailable: capturesTyping ? cursorRecorder.keystrokesWereAvailableForSession : nil,
                 shortcuts: capturesShortcuts ? cursorRecorder.shortcuts(through: duration) : nil,
                 shortcutCaptureAvailable: capturesShortcuts ? cursorRecorder.shortcutsWereAvailableForSession : nil,
-                webcam: webcam
+                webcam: webcam,
+                recordingSource: recordingSource
             )
             clearSession(generation: stopGeneration)
             try session.save(in: directory)
@@ -263,11 +312,14 @@ final class ScreenRecorder {
     private func clearSession(generation clearedGeneration: UInt64) {
         guard currentGeneration == clearedGeneration else { return }
         stream = nil
+        windowTrackingTask?.cancel()
+        windowTrackingTask = nil
         output = nil
         pipeline = nil
         directory = nil
         displayID = nil
         dimensions = nil
+        recordingSource = nil
         createdAt = nil
         currentGeneration = nil
         pendingCaptureFailure = nil

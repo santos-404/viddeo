@@ -17,6 +17,7 @@ struct VerifyCaptions {
         try testGrouping()
         try testPresentation()
         try await testRenderer()
+        try testLayoutRect()
         try await testServiceFlow()
         // Compile-only: the real recognizer is a live-checklist item.
         let _: any CaptionTranscriptionProvider = AppleSpeechCaptionProvider()
@@ -350,6 +351,61 @@ struct VerifyCaptions {
             return all
         }
         try expect(concurrent.allSatisfy { $0 == reference }, "concurrent renders are identical")
+    }
+
+    /// Captions are laid out inside the resolved stage rect (captions.md, renderer 510,941-513,400):
+    /// size and position follow that rect, inset 10 % of its own width/height, not the canvas.
+    private static func testLayoutRect() throws {
+        let config = CaptionConfiguration()
+        func box(_ rect: CGRect?, config: CaptionConfiguration = config, track: CaptionTrack = sampleTrack(),
+                 at time: Double = 1200) throws -> (minX: Int, maxX: Int, minY: Int, maxY: Int) {
+            guard let pixels = try CaptionRenderer(track: track, configuration: config, outputSize: size, layoutRect: rect)
+                .cgImage(at: time).map(Pixels.init), let bounds = pixels.bounds({ $0.a > 0 })
+            else { throw Failure("no caption for \(String(describing: rect))") }
+            return bounds
+        }
+        // No stage and matching aspect: the content rect is the canvas, so output equals the unrouted default.
+        let canvas = CGRect(origin: .zero, size: size)
+        let plain = try render(config, at: 2100)?.bytes
+        let viaCanvas = try CaptionRenderer(track: sampleTrack(), configuration: config, outputSize: size, layoutRect: canvas)
+            .cgImage(at: 2100).map(Pixels.init)?.bytes
+        try expect(plain != nil && plain == viaCanvas, "a canvas-sized layout rect is byte-identical to no rect (no-stage output unchanged)")
+        for bad in [CGRect.zero, CGRect(x: Double.nan, y: 0, width: 10, height: 10), CGRect(x: 5000, y: 5000, width: 10, height: 10)] {
+            let fallback = try CaptionRenderer(track: sampleTrack(), configuration: config, outputSize: size, layoutRect: bad)
+                .cgImage(at: 2100).map(Pixels.init)?.bytes
+            try expect(fallback == plain, "an unusable layout rect falls back to the canvas")
+        }
+
+        // Large padding (25 % of 720) with a 4:3 source in a 16:9 canvas: the stage rect is 480 x 360 at
+        // (400, 180) in Core Image space, i.e. top-left y 180...540. Inset 10 % -> x 448...832, y 216...504.
+        let stage = CGRect(x: 400, y: 180, width: 480, height: 360)
+        let inStage = try box(stage)
+        try expect(inStage.minX >= 448 && inStage.maxX <= 832 && inStage.maxY <= 504 && inStage.maxY >= 501 && inStage.minY >= 216,
+                   "caption box inside the inset stage rect: \(inStage)")
+        let full = try box(nil)
+        let heightRatio = Double(inStage.maxY - inStage.minY + 1) / Double(full.maxY - full.minY + 1)
+        try expect(abs(heightRatio - 0.5) < 0.06, "font size follows the stage height (360 / 720): \(heightRatio)")
+        let completeLine = try box(stage, at: 2100)
+        try expect(abs(Double(completeLine.minX + completeLine.maxX) / 2 - 640) <= 1.5,
+                   "centered position x = 0.5 is the stage centre, not an edge-relative canvas offset")
+
+        // Off-centre rect (not vertically centred) checks the flip from Core Image to top-left space:
+        // CI y 50...350 -> top-left y 370...670; inset 10 % -> x 140...460, y 400...640.
+        var top = config
+        top.position = CaptionConfiguration.Position(x: 0, y: 0)
+        let offCentre = CGRect(x: 100, y: 50, width: 400, height: 300)
+        let bottomRight = try box(offCentre)
+        try expect(bottomRight.minX >= 140 && bottomRight.maxX <= 460 && bottomRight.maxY <= 640 && bottomRight.maxY >= 637,
+                   "bottom caption sits on the inset bottom of an off-centre rect: \(bottomRight)")
+        let topLeft = try box(offCentre, config: top)
+        try expect(topLeft.minX >= 140 && topLeft.minX <= 142 && topLeft.minY >= 400 && topLeft.minY <= 402,
+                   "position (0, 0) sits on the inset top-left corner: \(topLeft)")
+
+        // A line wider than the stage rect shrinks to fit it rather than leaving it.
+        let long = CaptionTrack(locale: "en-US", cues: [CaptionCue(startMs: 0, endMs: 3000, text: "wideword wideword wideword wideword wideword")])
+        let narrow = CGRect(x: 400, y: 180, width: 240, height: 360)
+        let fitted = try box(narrow, track: long, at: 2900)
+        try expect(fitted.minX >= 424 && fitted.maxX <= 616, "long line fits the inset narrow rect: \(fitted)")
     }
 
     // MARK: Service flow

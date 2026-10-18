@@ -22,6 +22,7 @@ struct VerifyStage {
             try? FileManager.default.removeItem(at: outside)
         }
         try verifyDefaults()
+        try verifyNewRecordingDefaults(in: temp)
         try verifyValidation()
         try verifyPersistence(in: temp)
         try verifyStageRect()
@@ -63,6 +64,37 @@ struct VerifyStage {
                   "a preset has an invalid stop list")
         try check(presets.contains { $0.stops.map(\.color) == ["#4776e6", "#8e54e9"] },
                   "presets do not include the default pair")
+    }
+
+    /// New recordings get the reference's declared defaults (padding 0.1, display radius 0, shadow,
+    /// inset 0, system background -> viddeo's own wallpaper); `StageStyle()` and legacy files keep radius 16.
+    static func verifyNewRecordingDefaults(in directory: URL) throws {
+        let fresh = StageStyle.newRecordingDefault
+        try check(fresh.paddingRatio == 0.1 && fresh.cornerRadius == 0, "new-recording padding/radius are not 0.1/0")
+        try check(fresh.shadow == StageStyle.Shadow() && fresh.inset.size == 0 && fresh.backgroundBlur == 0,
+                  "new-recording shadow/inset/blur differ from the declared defaults")
+        try check(fresh.background == .wallpaper("graphite") && StageStyle.wallpaperNames.contains("graphite"),
+                  "new-recording background is not viddeo's procedural system wallpaper")
+        try check(!fresh.deviceMockup.enabled, "new recordings start without a device frame")
+        try check((try? fresh.validate()) != nil, "new-recording default does not validate")
+        try check(StageStyle().cornerRadius == 16 && StageStyle().background == .standard, "StageStyle() default changed for legacy use")
+        let legacy = try JSONDecoder().decode(StageStyle.self, from: Data(#"{"paddingRatio":0.2}"#.utf8))
+        try check(legacy.cornerRadius == 16 && legacy.background == .standard, "legacy stage sidecar no longer decodes to radius 16")
+        let empty = directory.appendingPathComponent("new-defaults", isDirectory: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try check(try StageStyle.load(in: empty) == StageStyle(), "missing sidecar is not the legacy default")
+        try StageStyle.writeNewRecordingDefault(in: empty)
+        try check(try StageStyle.load(in: empty) == fresh, "new-recording sidecar did not round-trip")
+        // Radius 0 reaches the pixels: the content corner is not rounded away, unlike radius 16.
+        func cornerIsContent(_ style: StageStyle) throws -> Bool {
+            let stage = try StageRenderer(style: style, outputSize: output)
+            let rect = stage.stageRect(contentAspect: 16.0 / 9.0)
+            let image = try Bitmap(stage.compose(content(width: Int(rect.width), height: Int(rect.height))))
+            let pixel = image.color(Int(rect.minX), Int(rect.minY))
+            return abs(Double(pixel.0) - contentColor.r) < 0.03 && abs(Double(pixel.1) - contentColor.g) < 0.03
+        }
+        try check(try cornerIsContent(fresh), "radius 0 still rounds the content corner")
+        try check(!(try cornerIsContent(StageStyle())), "radius 16 no longer rounds the content corner")
     }
 
     static func verifyValidation() throws {

@@ -30,6 +30,7 @@ struct EditorView: View {
                 stage.tabItem { Text("Background") }
                 captions.tabItem { Text("Captions") }
                 masks.tabItem { Text("Masks") }
+                zooms.tabItem { Text("Zoom") }
                 audio.tabItem { Text("Audio") }
                 if editor.session.webcam != nil { camera.tabItem { Text("Camera") } }
                 if editor.hasShortcuts { shortcuts.tabItem { Text("Shortcuts") } }
@@ -227,6 +228,78 @@ struct EditorView: View {
                 }
             }
         }.padding(12)
+    }
+
+    private var zooms: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button("Add zoom at playhead") {
+                    editor.addZoom(atSource: editor.state.timeline.sourceTime(forPlaybackTime: previewModel.time))
+                }
+                Button("Regenerate automatic zooms") { editor.regenerateAutomaticZooms() }
+                Toggle("Animate 350 ms early", isOn: Binding(get: { editor.state.zoomItems.startAnimationEarly }, set: { value in
+                    editor.edit { $0.zoomItems.startAnimationEarly = value }
+                }))
+            }
+            Text("Ranges use source seconds (minimum 0.1 s). Adding inside a zoom splits it at the playhead; a new zoom in free space lasts up to 3 s. Regenerate replaces all zooms and can be undone.")
+                .font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(editor.state.zoomItems.items) { item in zoomRow(item) }
+                    if editor.state.zoomItems.items.isEmpty {
+                        Text("No zooms. Add a fixed target or regenerate automatic zooms.").foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }.padding(12)
+    }
+
+    private func updateZoom(_ id: UUID, key: String? = nil, _ change: @escaping (inout ZoomItem) -> Void) {
+        editor.edit({ state in
+            if let index = state.zoomItems.items.firstIndex(where: { $0.id == id }) { change(&state.zoomItems.items[index]) }
+            state.zoomItems.items.sort { $0.sourceStart < $1.sourceStart }
+        }, key: key.map { "zoom-\(id)-\($0)" })
+    }
+
+    private func zoomRow(_ item: ZoomItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Picker("Target", selection: Binding(get: { item.mode }, set: { value in updateZoom(item.id) { $0.mode = value } })) {
+                    Text("Automatic activity").tag(ZoomMode.autoFollow)
+                    Text("Fixed center").tag(ZoomMode.manual)
+                }.frame(width: 260)
+                Toggle("Enabled", isOn: Binding(get: { !item.isDisabled }, set: { on in updateZoom(item.id) { $0.isDisabled = !on } }))
+                Toggle("Instant animation", isOn: Binding(get: { item.hasInstantAnimation }, set: { on in updateZoom(item.id) { $0.hasInstantAnimation = on } }))
+                Spacer()
+                Button("Delete") { editor.edit { $0.zoomItems.items.removeAll { $0.id == item.id } } }
+            }
+            HStack {
+                number("Start", value: Binding(get: { item.sourceStart }, set: { value in
+                    updateZoom(item.id, key: "start") { $0.sourceStart = value }
+                }))
+                number("End", value: Binding(get: { item.sourceEnd }, set: { value in
+                    updateZoom(item.id, key: "end") { $0.sourceEnd = value }
+                }))
+                Text("s · \(item.scale.formatted(.number.precision(.fractionLength(2))))×").foregroundStyle(.secondary)
+            }
+            zoomSlider("Scale", item: item, value: item.scale, range: 1...8) { $0.scale = $1 }
+            if item.mode == .manual {
+                zoomSlider("Center X", item: item, value: item.centerX, range: 0...1) { $0.centerX = $1 }
+                zoomSlider("Center Y", item: item, value: item.centerY, range: 0...1) { $0.centerY = $1 }
+                Text("Center uses a top-left origin. The crop stays inside the recording at the edges.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+        }
+    }
+
+    private func zoomSlider(_ title: String, item: ZoomItem, value: Double, range: ClosedRange<Double>,
+                            change: @escaping (inout ZoomItem, Double) -> Void) -> some View {
+        HStack {
+            Text(title).frame(width: 65, alignment: .leading)
+            Slider(value: Binding(get: { value }, set: { v in updateZoom(item.id, key: title) { change(&$0, v) } }), in: range)
+            Text(value.formatted(.number.precision(.fractionLength(2)))).monospacedDigit().frame(width: 45)
+        }
     }
 
     private var masks: some View {

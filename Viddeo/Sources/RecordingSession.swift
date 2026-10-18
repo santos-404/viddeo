@@ -1,7 +1,8 @@
+import CoreGraphics
 import Foundation
 
 /// All event times are seconds from the first encoded video frame.
-/// Coordinates use the captured display's top-left origin, normalized to 0...1.
+/// Coordinates use the captured content's top-left origin, normalized to 0...1.
 struct CursorEvent: Codable, Sendable, Equatable {
     enum Kind: String, Codable, Sendable { case move, down, up }
     var time: Double
@@ -142,6 +143,8 @@ struct RecordingSession: Codable, Sendable {
     var cursorTypeCaptureAvailable: Bool? = nil
     /// Present when a camera was recorded next to the screen (`camera.mov`); absent on older sessions.
     var webcam: WebcamCaptureMetadata? = nil
+    /// Capture target and its initial global display-point geometry. Absent on legacy recordings (display).
+    var recordingSource: RecordingSource? = nil
 
     func save(in directory: URL) throws {
         let encoder = JSONEncoder()
@@ -151,6 +154,43 @@ struct RecordingSession: Codable, Sendable {
 
     static func load(from directory: URL) throws -> Self {
         try JSONDecoder().decode(Self.self, from: Data(contentsOf: directory.appendingPathComponent("session.json")))
+    }
+}
+
+enum RecordingSourceKind: String, Codable, Sendable { case display, window, area }
+
+/// Global desktop point rectangle. Global coordinates preserve negative display origins.
+struct RecordingSource: Codable, Sendable, Equatable {
+    var kind: RecordingSourceKind
+    var displayID: UInt32
+    var windowID: CGWindowID?
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+    var pixelScale: Double
+
+    var rect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+
+    static func evenDimensions(width: Double, height: Double, scale: Double, maximumWidth: Int = 3840,
+                               maximumHeight: Int = 2160) -> (width: Int, height: Int) {
+        let boundedScale = min(scale, Double(maximumWidth) / width, Double(maximumHeight) / height)
+        let pixelWidth = Int((width * boundedScale).rounded(.down))
+        let pixelHeight = Int((height * boundedScale).rounded(.down))
+        return (pixelWidth - pixelWidth % 2, pixelHeight - pixelHeight % 2)
+    }
+}
+
+/// Pure pointer transform from global desktop points into normalized captured-content coordinates.
+enum CursorCoordinateMapping {
+    static func normalized(_ point: CGPoint, in contentRect: CGRect, pixelScale: Double) -> CGPoint? {
+        guard contentRect.width > 0, contentRect.height > 0, pixelScale > 0,
+              contentRect.contains(point) else { return nil }
+        let pixelX = (point.x - contentRect.minX) * pixelScale
+        let pixelY = (point.y - contentRect.minY) * pixelScale
+        let pixelWidth = contentRect.width * pixelScale
+        let pixelHeight = contentRect.height * pixelScale
+        return CGPoint(x: pixelX / pixelWidth, y: pixelY / pixelHeight)
     }
 }
 

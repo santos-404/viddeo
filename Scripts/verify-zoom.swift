@@ -22,7 +22,137 @@ struct VerifyZoom {
         try testVisibleSourceGrouping()
         try testResolvedVisibleGeometry()
         try testSpringSamplingOrder()
-        print("Zoom verification passed: 18 checks")
+        try testItemSeedingAndPersistence()
+        try testManualItemsAndDisabled()
+        try testEditedAutomaticRange()
+        try testInstantAndEarlyItems()
+        try testItemValidationAndInsertion()
+        print("Zoom verification passed: 23 checks")
+    }
+
+    private static func testItemSeedingAndPersistence() throws {
+        let session = makeSession(duration: 10, events: [event(1, 0.2, 0.3, .move), event(2, 0.7, 0.3, .down),
+                                                       event(2.08, 0.7, 0.3, .up), event(6, 0.3, 0.7, .move)])
+        let seeded = ZoomTimeline.automaticItems(session: session)
+        let legacy = ZoomTimeline(session: session)
+        let explicit = ZoomTimeline(session: session, items: seeded)
+        try expect(seeded.items.map { ZoomRange(start: $0.sourceStart, end: $0.sourceEnd) } == legacy.ranges,
+                   "seeded item ranges equal legacy ranges")
+        for index in 0...1200 {
+            let t = Double(index) / 120
+            try expect(legacy.frame(at: t) == explicit.frame(at: t), "seeding must preserve every legacy sample and interpolation")
+        }
+        // Samples captured from the pre-item implementation, including entry and exit motion.
+        let golden = [(1.9, 1.7198355909706304, 0.29072546389030884, 0.356032881805874),
+                      (2.2, 1.9842562301909437, 0.5571979121615994, 0.3031487539618112),
+                      (3.0, 2.0, 0.7, 0.3),
+                      (4.8, 1.238534749067092, 0.5477069498134192, 0.4522930501865816),
+                      (5.2, 1.005195878221225, 0.5010391756442452, 0.4989608243557548)]
+        for (time, scale, x, y) in golden {
+            let frame = explicit.frame(at: time)
+            try expectClose(frame.scale, scale, "legacy golden scale")
+            try expectClose(frame.centerX, x, "legacy golden X")
+            try expectClose(frame.centerY, y, "legacy golden Y")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("viddeo-zoom-items-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let absent = try ZoomItemConfiguration.load(from: directory, duration: session.duration)
+        try expect(absent == nil, "absent sidecar signals legacy generation")
+        try seeded.save(to: directory, duration: session.duration)
+        let restored = try ZoomItemConfiguration.load(from: directory, duration: session.duration)
+        try expect(restored == seeded, "items JSON round trip preserves IDs, times, modes, centers and flags")
+        try ZoomItemConfiguration().save(to: directory, duration: session.duration)
+        let empty = try ZoomItemConfiguration.load(from: directory, duration: session.duration)
+        try expect(empty?.items.isEmpty == true && ZoomTimeline(session: session, items: empty).ranges.isEmpty,
+                   "explicit empty sidecar never regenerates automatic zooms")
+        try Data("{}".utf8).write(to: directory.appendingPathComponent(ZoomItemConfiguration.filename))
+        do {
+            _ = try ZoomItemConfiguration.load(from: directory, duration: session.duration)
+            throw VerificationError.failed("corrupt sidecar must fail instead of regenerating")
+        } catch is DecodingError { }
+    }
+
+    private static func testManualItemsAndDisabled() throws {
+        let session = makeSession(duration: 10, events: [event(2, 0.8, 0.2, .down), event(4, 0.2, 0.2, .move)])
+        let item = ZoomItem(sourceStart: 1, sourceEnd: 6, scale: 3, mode: .manual, centerX: 0.35, centerY: 0.65)
+        let timeline = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item]))
+        let settled = timeline.frame(at: 4)
+        try expectClose(settled.centerX, 0.35, "manual X ignores moving cursor")
+        try expectClose(settled.centerY, 0.65, "manual Y ignores moving cursor")
+        try expectClose(settled.scale, 3, "item scale overrides global default")
+        try expectClose(timeline.frame(at: 0.5).scale, 1, "source range has not started")
+        try expectClose(timeline.frame(at: 9).scale, 1, "source range ended and spring settled")
+        for time in [5.5, 0.2, 8.5, 2.3, 5.5] {
+            let independent = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item]))
+            try expect(timeline.frame(at: time) == independent.frame(at: time), "manual seek order is deterministic")
+        }
+        var disabled = item
+        disabled.isDisabled = true
+        disabled.hasInstantAnimation = true
+        let off = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [disabled], startAnimationEarly: true))
+        try expect(off.ranges.isEmpty, "disabled item has no active range")
+        for time in stride(from: 0.0, through: 10, by: 0.1) {
+            try expectClose(off.frame(at: time).scale, 1, "disabled zoom is identity, including lead-in and instant window")
+        }
+    }
+
+    private static func testEditedAutomaticRange() throws {
+        let session = makeSession(duration: 10, events: [event(0.5, 0.8, 0.2, .move), event(2, 0.7, 0.3, .down),
+                                                       event(4, 0.1, 0.8, .move), event(6, 0.9, 0.8, .down)])
+        let item = ZoomItem(sourceStart: 1, sourceEnd: 3, scale: 2)
+        let timeline = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item]))
+        try expect(timeline.ranges == [ZoomRange(start: 1, end: 3)], "edited range replaces generated windows")
+        try expectClose(timeline.frame(at: 2.8).centerX, 0.75, "events beyond edited range cannot pull target")
+        try expectClose(timeline.frame(at: 8).scale, 1, "click outside item never creates a zoom")
+        var requested: [(Double, Double)] = []
+        _ = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item]), visibleSourceSize: { time, scale in
+            requested.append((time, scale)); return CGSize(width: 500, height: 200)
+        })
+        try expect(requested.count == 1 && requested[0].0 == 1 && requested[0].1 == 2, "auto geometry resolves at edited source start and scale")
+    }
+
+    private static func testInstantAndEarlyItems() throws {
+        let session = makeSession(duration: 6, events: [])
+        var item = ZoomItem(sourceStart: 1, sourceEnd: 3, scale: 2, mode: .manual, centerX: 0.3, centerY: 0.7)
+        item.hasInstantAnimation = true
+        let instant = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item], startAnimationEarly: true))
+        try expectClose(instant.frame(at: 0.9).scale, 1, "instant items suppress anticipation even with early animation enabled")
+        try expectClose(instant.frame(at: 1).scale, 1, "advance-before-retarget also applies to instant animation")
+        try expectClose(instant.frame(at: 1 + 1.0 / 60).scale, 2, "instant zoom snaps on next sample")
+        try expectClose(instant.frame(at: 3.0 + 2.0 / 60).scale, 1, "50 ms instant tail snaps the zoom out")
+        item.hasInstantAnimation = false
+        let normal = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item]))
+        let early = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [item], startAnimationEarly: true))
+        try expectClose(normal.frame(at: 0.9).scale, 1, "early animation off by default")
+        try expect(early.frame(at: 0.9).scale > 1.2, "350 ms anticipation applies only when enabled")
+        let blocked = ZoomItem(sourceStart: 0, sourceEnd: 1, isDisabled: true)
+        let withDisabled = ZoomTimeline(session: session, items: ZoomItemConfiguration(items: [blocked, item], startAnimationEarly: true))
+        try expect(withDisabled.frame(at: 0.9) == early.frame(at: 0.9), "disabled items do not block anticipation of the next enabled zoom")
+    }
+
+    private static func testItemValidationAndInsertion() throws {
+        let original = ZoomItem(sourceStart: 1, sourceEnd: 6)
+        var config = ZoomItemConfiguration(items: [original])
+        try config.addManual(atSource: 3, duration: 10)
+        try expect(config.items.count == 2 && config.items[0].sourceEnd == 3 && config.items[1].sourceStart == 3
+                   && config.items[1].sourceEnd == 6 && config.items[1].mode == .manual, "inserting inside a zoom splits it")
+        try config.addManual(atSource: 7, duration: 10)
+        try expect(config.items.last?.sourceEnd == 10, "free-space zoom uses three seconds")
+        let valid = config
+        do { try config.addManual(atSource: 9.99, duration: 10); throw VerificationError.failed("short insertion accepted") }
+        catch ZoomItemError.invalidItems { }
+        try expect(config == valid, "failed insertion leaves items intact")
+        var invalids: [ZoomItemConfiguration] = []
+        var bad = original; bad.sourceStart = -1; invalids.append(ZoomItemConfiguration(items: [bad]))
+        bad = original; bad.centerX = .nan; invalids.append(ZoomItemConfiguration(items: [bad]))
+        bad = original; bad.scale = 9; invalids.append(ZoomItemConfiguration(items: [bad]))
+        bad = original; bad.sourceEnd = 11; invalids.append(ZoomItemConfiguration(items: [bad]))
+        bad = original; bad.id = UUID(); invalids.append(ZoomItemConfiguration(items: [original, bad]))
+        for invalid in invalids {
+            do { try invalid.validate(duration: 10); throw VerificationError.failed("invalid zoom items accepted") }
+            catch ZoomItemError.invalidItems { }
+        }
     }
 
     private static func testSpringSettleEstimates() throws {

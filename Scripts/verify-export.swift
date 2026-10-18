@@ -197,10 +197,92 @@ struct VerifyExport {
         try await verifyWebcam(root: directory, width: width, height: height, duration: duration)
         try await verifyShortcuts(root: directory, width: width, height: height, duration: duration)
         try await verifyMasks(root: directory, width: width, height: height, duration: duration)
+        try await verifyManualZoom(session: session, root: directory)
 
         try await verifyScreenMotionBlur(session: session, directory: directory)
         try await verifyRenderedCursor(session: session, directory: directory)
         print("Offline export verified: H.264, \(expectedSize.width)×\(expectedSize.height) from \(width)×\(height), \(outDuration)s, two synced audio tracks, 2× marker scale, filled edges; edits: trim/split/reorder, 2× slow-down, per-segment audio, stage, source-time captions, edited GIF, ExportEdit.load; audio mix (master volume, mute, microphone cleanup, click-sound track, looping/fading background music, single-track mixdown with limiter and loudness target); camera overlay (offset, hold, trim/reorder, hide, full-screen, GIF); split-screen (direction, flip, ratio, stage gap), timed layout items, cutout (fallback, cached, injected mask); rendered cursor, typing and segment hiding; screen motion blur (smear during zoom, identity when stationary, none across a cut, speed ramp, stage); keyboard shortcut overlay (place, time window, off by default, ExportEdit.load); masks (sensitive-data blur and highlight dim inside their time range only, following a 2× zoom, masks.json via ExportEdit.load and the exporter fallback).")
+    }
+
+    /// Detect the magenta fixture ring in encoded pixels. At 5.5 seconds the automatic
+    /// cursor target is at the bottom; a manual top-right center must keep the ring centered.
+    private static func verifyManualZoom(session: RecordingSession, root: URL) async throws {
+        let directory = root.appendingPathComponent("manual-zoom")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: root.appendingPathComponent(session.videoFilename),
+                                        to: directory.appendingPathComponent(session.videoFilename))
+        try session.save(in: directory)
+        let item = ZoomItem(sourceStart: 1, sourceEnd: 7, scale: 3, mode: .manual, centerX: 0.75, centerY: 0.25)
+        let config = ZoomItemConfiguration(items: [item])
+        let settings = ExportSettings(fps: 30, height: 720)
+        var edit = ExportEdit(motionBlurAmount: 0, zoomItems: config)
+        let destination = directory.appendingPathComponent("manual.mp4")
+        try await OfflineExporter().export(session: session, directory: directory, destination: destination,
+                                           showsClickEffects: false, settings: settings, edit: edit)
+        let marker = try await markerBounds(asset: AVURLAsset(url: destination), time: 5.5)
+        guard abs(marker.midX - 640) < 4, abs(marker.midY - 360) < 4, marker.width > 220 else {
+            throw VerificationError.failed("manual zoom did not center and enlarge the chosen region in MP4 pixels: \(marker)")
+        }
+        // Preview uses the same factory, including its reduced-width path and source-time mapping.
+        var trim = TimelineModel(sourceDuration: session.duration)
+        try trim.trim(segmentID: trim.segments[0].id, newStart: 5, newEnd: 6)
+        edit.timeline = trim
+        let preview = try await OfflineExporter.makeRenderer(session: session, directory: directory, settings: settings,
+                                                             edit: edit, showsClickEffects: false, previewWidth: 320)
+        let frames = try await ExportFrameSource(asset: AVURLAsset(url: preview.sourceURL), duration: preview.sourceDuration,
+                                                 timeline: trim, seekable: true)
+        defer { frames.cancel() }
+        let time = preview.renderer.sourceTime(forPlaybackTime: 0.5)
+        guard let source = try frames.image(atSource: time),
+              let image = CIContext().createCGImage(preview.renderer.image(source: source, at: time), from: preview.renderer.outputRect) else {
+            throw VerificationError.failed("manual zoom preview frame missing")
+        }
+        func magentaCenter(_ image: CGImage) throws -> CGPoint {
+            let rep = NSBitmapImageRep(cgImage: image)
+            var xs: [Int] = [], ys: [Int] = []
+            for y in 0..<rep.pixelsHigh {
+                for x in 0..<rep.pixelsWide {
+                    if let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                       c.redComponent > 0.55, c.greenComponent < 0.35, c.blueComponent > 0.55 { xs.append(x); ys.append(y) }
+                }
+            }
+            guard let left = xs.min(), let right = xs.max(), let top = ys.min(), let bottom = ys.max() else {
+                throw VerificationError.failed("manual zoom marker missing")
+            }
+            return CGPoint(x: Double(left + right) / 2, y: Double(top + bottom) / 2)
+        }
+        let previewCenter = try magentaCenter(image)
+        guard abs(previewCenter.x - 160) < 3, abs(previewCenter.y - 90) < 3 else {
+            throw VerificationError.failed("manual target missing from trimmed preview pixels: \(previewCenter)")
+        }
+        try config.save(to: directory, duration: session.duration)
+        guard try ExportEdit.load(from: directory, session: session).zoomItems == config else {
+            throw VerificationError.failed("ExportEdit did not load zoom-items.json")
+        }
+        // Nil edit zooms read the sidecar even when a caller supplies another export edit.
+        let fallback = try await OfflineExporter.makeRenderer(session: session, directory: directory, settings: settings,
+                                                              edit: ExportEdit(motionBlurAmount: 0), showsClickEffects: false)
+        guard fallback.renderer.timeline.frame(at: 5.5).centerY == 0.25 else {
+            throw VerificationError.failed("renderer ignored the zoom sidecar fallback")
+        }
+        let empty = try await OfflineExporter.makeRenderer(session: session, directory: directory, settings: settings,
+                                                           edit: ExportEdit(zoomItems: .init()), showsClickEffects: false)
+        guard empty.renderer.timeline.frame(at: 5.5).scale == 1 else {
+            throw VerificationError.failed("unsaved empty zoom list failed to override persisted zooms")
+        }
+        // A trimmed GIF proves playback mapping still resolves the manual center in source time.
+        let gifURL = directory.appendingPathComponent("manual.gif")
+        let gifSettings = ExportSettings(format: .gif, fps: 10, height: 480)
+        try await OfflineExporter().export(session: session, directory: directory, destination: gifURL,
+                                           showsClickEffects: false, settings: gifSettings, edit: edit)
+        guard let gif = CGImageSourceCreateWithURL(gifURL as CFURL, nil), let gifFrame = CGImageSourceCreateImageAtIndex(gif, 5, nil) else {
+            throw VerificationError.failed("manual GIF frame missing")
+        }
+        let gifCenter = try magentaCenter(gifFrame)
+        guard abs(gifCenter.x - Double(gifFrame.width) / 2) < 3, abs(gifCenter.y - Double(gifFrame.height) / 2) < 3 else {
+            throw VerificationError.failed("manual target missing from trimmed GIF pixels: \(gifCenter)")
+        }
+        print("Manual zoom verified: 7 checks (MP4 marker center/scale, trimmed preview pixels, sidecar loader/fallback, empty override, trimmed GIF pixels)")
     }
 
     /// Screen / zoom motion blur through the real renderer. The click at 3.0 s starts a fast zoom-in
@@ -1598,6 +1680,29 @@ struct VerifyExport {
             }
         }
 
+        // (e2) Captions sit inside the resolved STAGE rect, not the canvas: padding 0.25 around a 16:9
+        // recording in a 16:9 canvas leaves a 640x360 stage at x 320...960, y 180...540 (top-left), so the
+        // pill must lie inside its 10 % inset (x 384...896, y 216...504) and be half the unstaged size.
+        var stageStyle = StageStyle()
+        stageStyle.paddingRatio = 0.25
+        let stagedURL = directory.appendingPathComponent("staged-captions.mp4")
+        let plainURL = directory.appendingPathComponent("plain-captions.mp4")
+        for (url, stageValue) in [(stagedURL, Optional(stageStyle)), (plainURL, nil)] {
+            try await OfflineExporter().export(session: session, directory: directory, destination: url, settings: settings,
+                                               edit: ExportEdit(stage: stageValue, captions: (captionTrack, captionConfig)))
+        }
+        let stagedPill = try await captionBounds(asset: AVURLAsset(url: stagedURL), time: 6.0)
+        let plainPill = try await captionBounds(asset: AVURLAsset(url: plainURL), time: 6.0)
+        guard let stagedPill, let plainPill else { throw VerificationError.failed("no caption pill in the staged/plain export") }
+        guard stagedPill.minX >= 380, stagedPill.maxX <= 900, stagedPill.minY >= 212, stagedPill.maxY <= 508,
+              stagedPill.maxY >= 495 else {
+            throw VerificationError.failed("staged caption pill \(stagedPill) is not inside the inset stage rect x 384...896, y 216...504")
+        }
+        let ratio = Double(stagedPill.maxY - stagedPill.minY) / Double(plainPill.maxY - plainPill.minY)
+        guard plainPill.maxY > 640, abs(ratio - 0.5) < 0.1 else {
+            throw VerificationError.failed("unstaged caption \(plainPill) changed or staged size ratio \(ratio) is not ~0.5")
+        }
+
         // (c) Audio follows the plan: per track, aligned to the video within 0.1 s; the system track
         // plays the 660 Hz part first and the 440 Hz part after the reorder; the microphone is
         // audible in [0,3) and muted (volume 0) in [3,6).
@@ -1992,6 +2097,23 @@ struct VerifyExport {
             }
         }
         return (inside, outside)
+    }
+
+    /// Bounding box (top-left pixels) of the cyan caption pill anywhere in the frame, nil when absent.
+    private static func captionBounds(asset: AVAsset, time: Double) async throws -> (minX: Int, maxX: Int, minY: Int, maxY: Int)? {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let rep = NSBitmapImageRep(cgImage: try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image)
+        var box: (Int, Int, Int, Int)?
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      color.redComponent < 0.35, color.greenComponent > 0.7, color.blueComponent > 0.7 else { continue }
+                if let b = box { box = (min(b.0, x), max(b.1, x), min(b.2, y), max(b.3, y)) } else { box = (x, x, y, y) }
+            }
+        }
+        return box.map { (minX: $0.0, maxX: $0.1, minY: $0.2, maxY: $0.3) }
     }
 
     /// Fully opaque cyan caption-pill pixels in the lower part of the frame (none occur in the fixture).

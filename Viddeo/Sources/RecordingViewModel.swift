@@ -13,13 +13,30 @@ struct DisplayOption: Identifiable, Equatable, Sendable {
     var description: String { "\(name) — \(width) × \(height)" }
 }
 
+struct WindowOption: Identifiable, Equatable {
+    let id: CGWindowID
+    let appName: String
+    let title: String
+    var description: String { "\(appName) — \(title.isEmpty ? "Untitled Window" : title)" }
+}
+
 @MainActor
 @Observable
 final class RecordingViewModel {
     enum Phase { case idle, starting, recording, stopping, exporting }
     private(set) var displays: [DisplayOption] = []
+    private(set) var windows: [WindowOption] = []
+    var recordingSourceKind: RecordingSourceKind = .display
+    var selectedWindowID: CGWindowID?
+    var areaX = 0.0
+    var areaY = 0.0
+    var areaWidth = 800.0
+    var areaHeight = 600.0
     var capturesSystemAudio = false
     var capturesMicrophone = false
+    /// Master switch for click effects in export and preview, left on: the reference's "off" default is the
+    /// new recording's `click-config.json` effect `none` (see `writeNewRecordingDefaults`), so choosing Circle or
+    /// Ripple in the editor takes effect without also finding this toggle.
     var showsClickEffects = true
     var rendersCursor = true
     var capturesTypingTiming = false
@@ -42,11 +59,16 @@ final class RecordingViewModel {
     }
     @ObservationIgnored private static let presetDefaultsKey = "viddeo.exportPresetID"
     @ObservationIgnored private var captureDisplays: [UInt32: SCDisplay] = [:]
+    @ObservationIgnored private var captureWindows: [CGWindowID: SCWindow] = [:]
     @ObservationIgnored private let recorder = ScreenRecorder()
     @ObservationIgnored private let exporter = OfflineExporter()
     @ObservationIgnored private var operation: Task<Void, Never>?
 
-    var canStart: Bool { !isBusy && selectedDisplayID != nil && !isRefreshing }
+    var canStart: Bool {
+        !isBusy && selectedDisplayID != nil && !isRefreshing &&
+        (recordingSourceKind != .window || selectedWindowID != nil) &&
+        (recordingSourceKind != .area || (areaWidth >= 2 && areaHeight >= 2 && areaX >= 0 && areaY >= 0))
+    }
     var canStop: Bool { phase == .recording }
     var canExport: Bool { !isBusy && session != nil && editor != nil }
     var isBusy: Bool { phase != .idle || editor?.isWorking == true }
@@ -112,6 +134,14 @@ final class RecordingViewModel {
             }
             displays = refreshedDisplays
             captureDisplays = Dictionary(uniqueKeysWithValues: content.displays.map { ($0.displayID, $0) })
+            let windowOptions = content.windows.compactMap { window -> (WindowOption, SCWindow)? in
+                guard window.isOnScreen, let app = window.owningApplication else { return nil }
+                return (WindowOption(id: window.windowID, appName: app.applicationName,
+                                     title: window.title ?? ""), window)
+            }.sorted { $0.0.description.localizedCaseInsensitiveCompare($1.0.description) == .orderedAscending }
+            windows = windowOptions.map(\.0)
+            captureWindows = Dictionary(uniqueKeysWithValues: windowOptions.map { ($0.0.id, $0.1) })
+            if let selectedWindowID, captureWindows[selectedWindowID] == nil { self.selectedWindowID = nil }
             if let selectedDisplayID, !refreshedDisplays.contains(where: { $0.id == selectedDisplayID }) {
                 self.selectedDisplayID = nil
             }
@@ -124,6 +154,8 @@ final class RecordingViewModel {
         } catch {
             displays = []
             captureDisplays = [:]
+            windows = []
+            captureWindows = [:]
             selectedDisplayID = nil
             refreshError = "Viddeo could not access shareable screen content. Allow Screen Recording in System Settings > Privacy & Security > Screen Recording, then quit and reopen Viddeo. (\(error.localizedDescription))"
             status = "Screen access needs attention."
@@ -132,6 +164,11 @@ final class RecordingViewModel {
 
     func startRecording() {
         guard canStart, let selectedDisplayID, let display = captureDisplays[selectedDisplayID] else { return }
+        let window = recordingSourceKind == .window ? selectedWindowID.flatMap { captureWindows[$0] } : nil
+        let captureDisplay = window.flatMap { window in
+            captureDisplays.values.first { CGDisplayBounds($0.displayID).intersects(window.frame) }
+        } ?? display
+        let area = recordingSourceKind == .area ? CGRect(x: areaX, y: areaY, width: areaWidth, height: areaHeight) : nil
         guard preserveEdits() else { return }
         phase = .starting
         operationError = nil
@@ -144,7 +181,7 @@ final class RecordingViewModel {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try ZoomConfiguration().save(in: directory)
                 if rendersCursor { try CursorConfiguration().save(in: directory) }
-                try await recorder.start(display: display, directory: directory,
+                try await recorder.start(display: captureDisplay, window: window, areaRect: area, directory: directory,
                                          capturesSystemAudio: capturesSystemAudio,
                                          capturesMicrophone: capturesMicrophone,
                                          rendersCursor: rendersCursor, capturesKeystrokes: rendersCursor && capturesTypingTiming,
@@ -175,6 +212,7 @@ final class RecordingViewModel {
                 session = completed
                 sessionDirectory = directory
                 exportedURL = nil
+                let defaultsError = writeNewRecordingDefaults(to: directory)
                 let presetError = applyPresets(from: directory)
                 let editorError = openEditor(session: completed, directory: directory)
                 phase = .idle
@@ -192,6 +230,7 @@ final class RecordingViewModel {
                     }
                 }
                 if let webcamWarning = recorder.webcamWarning { warnings.append(webcamWarning) }
+                if let defaultsError { warnings.append(defaultsError) }
                 if let presetError { warnings.append(presetError) }
                 if let editorError { warnings.append(editorError) }
                 if completed.keystrokeCaptureAvailable == false {
@@ -322,6 +361,26 @@ final class RecordingViewModel {
             status = "Loaded session \(loaded.id.uuidString.prefix(8)). Ready to export."
         } catch {
             operationError = error.localizedDescription
+        }
+    }
+
+    /// Gives a just-finished recording the reference's new-project defaults (stage on over viddeo's own
+    /// wallpaper with padding 0.1 and radius 0, click effect off) by writing the sidecars the editor already
+    /// reads. The files are the new-versus-legacy marker: only this path writes them before a project exists, so
+    /// sessions recorded earlier (no sidecars, or a saved project) keep their behaviour. Nothing is overwritten.
+    private func writeNewRecordingDefaults(to directory: URL) -> String? {
+        let manager = FileManager.default
+        guard !manager.fileExists(atPath: directory.appendingPathComponent(ViddeoProject.filename).path) else { return nil }
+        do {
+            if !manager.fileExists(atPath: directory.appendingPathComponent("stage-config.json").path) {
+                try StageStyle.writeNewRecordingDefault(in: directory)
+            }
+            if !manager.fileExists(atPath: directory.appendingPathComponent("click-config.json").path) {
+                try ClickEffectConfiguration.newRecordingDefault.save(in: directory)
+            }
+            return nil
+        } catch {
+            return "The recording was saved, but its default look could not be written: \(error.localizedDescription)"
         }
     }
 
