@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viddeo — logo</title>
+<link rel="icon" href="logo/viddeo-icon.svg">
+<style>
+  :root {
+    --blue: #2563FF; --ink: #0D1321; --red: #FF3B3B;
+    --paper: #F6F7FB; --line: #E3E6EF; --muted: #5D6577;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif;
+  }
+  main { max-width: 1120px; margin: 0 auto; padding: 56px 32px 96px; }
+  h2 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 72px 0 16px; font-weight: 600; }
+  p { color: var(--muted); max-width: 60ch; }
+  svg { display: block; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 20px; }
+
+  /* hero */
+  .hero { display: grid; place-items: center; padding: 110px 40px; }
+  .hero svg { width: min(720px, 100%); height: auto; }
+  .hero-caption { display: flex; justify-content: space-between; margin-top: 14px; color: var(--muted); font-size: 13px; }
+  .replay { all: unset; cursor: pointer; color: var(--blue); font-weight: 600; }
+
+  /* intro animation: play → pause → record */
+  .anim .play  { transform-box: fill-box; transform-origin: center; animation: play-in .7s cubic-bezier(.2,.9,.2,1.2) both; }
+  .anim .letter { animation: fade-in .6s ease-out .15s both; }
+  .anim .pause { transform-box: fill-box; transform-origin: bottom; animation: bar-in .55s cubic-bezier(.2,.9,.25,1.15) .45s both; }
+  .anim .rec   { transform-box: fill-box; transform-origin: center; animation: rec-in .5s cubic-bezier(.2,.9,.3,1.4) .85s both, rec-blink 2.4s ease-in-out 1.6s infinite; }
+  @keyframes play-in { from { transform: translateX(-40%) scale(.6); opacity: 0; } }
+  @keyframes fade-in { from { opacity: 0; } }
+  @keyframes bar-in  { from { transform: scaleY(0); } }
+  @keyframes rec-in  { from { transform: scale(0); } }
+  @keyframes rec-blink { 0%, 55%, 100% { opacity: 1; } 70%, 85% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .anim * { animation: none !important; } }
+
+  /* concept */
+  .concept { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .concept .card { padding: 28px 28px 24px; }
+  .concept svg { width: 100%; height: auto; margin-bottom: 20px; }
+  .concept svg path { opacity: .12; transition: opacity .3s; }
+  .concept .f-play  svg .play,  .concept .f-pause svg .pause, .concept .f-rec svg .rec { opacity: 1; }
+  .concept h3 { margin: 0 0 4px; font-size: 16px; display: flex; gap: 10px; align-items: center; }
+  .concept h3 span { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .concept p { margin: 0; font-size: 14px; }
+
+  /* variations */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .tile { border-radius: 20px; padding: 64px 48px; display: grid; place-items: center; border: 1px solid var(--line); }
+  .tile img { width: 100%; max-width: 380px; }
+  .tile.dark { background: #0B0F1A; border-color: #0B0F1A; }
+  .tile.blue { background: var(--blue); border-color: var(--blue); }
+  .tile.photo { background: linear-gradient(135deg, #3a2f6b, #c0566b 55%, #f2a65a); border: 0; }
+  .label { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+  /* palette */
+  .palette { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .swatch { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: #fff; }
+  .swatch .chip { height: 140px; display: flex; align-items: flex-end; padding: 16px; color: #fff; font-weight: 600; }
+  .swatch .meta { padding: 14px 16px; font: 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); }
+  .swatch .meta b { color: var(--ink); font: 600 14px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif; display: block; margin-bottom: 4px; }
+
+  /* icons */
+  .icons { display: flex; gap: 40px; align-items: flex-end; flex-wrap: wrap; padding: 48px; }
+  .icons figure { margin: 0; text-align: center; }
+  .icons figcaption { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .icons img { display: block; filter: drop-shadow(0 8px 18px rgba(13,19,33,.18)); }
+
+  /* sizes + clear space */
+  .sizes { display: flex; gap: 48px; align-items: flex-end; flex-wrap: wrap; padding: 48px; }
+  .sizes figure { margin: 0; }
+  .clear { position: relative; display: grid; place-items: center; padding: 60px; }
+  .clear .box { position: relative; padding: 43px; outline: 1.5px dashed #F3A6A6; background:
+      repeating-linear-gradient(45deg, rgba(255,59,59,.07) 0 6px, transparent 6px 12px); }
+  .clear .box img { height: 64px; display: block; background: #fff; }
+  .clear .x { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); font-size: 12px; color: #d65a5a; font-weight: 600; }
+
+  @media (max-width: 820px) { .concept, .grid2, .palette { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+
+  <section class="card hero">
+    <div id="hero" class="anim">{{LOGO_LIGHT}}</div>
+  </section>
+  <div class="hero-caption"><span>viddeo — primary wordmark</span><button class="replay" onclick="replay()">↻ Replay intro</button></div>
+
+  <h2>Concept</h2>
+  <div class="concept">
+    <div class="card f-play">{{LOGO_LIGHT}}<h3>▶ Play <span>leads the “v”</span></h3><p>The play triangle sits in front of the v and points the whole word forward. It is set at x-height so it reads as part of the word.</p></div>
+    <div class="card f-pause">{{LOGO_LIGHT}}<h3>❚❚ Pause <span>the stems of “dd”</span></h3><p>Each d stem is a pause bar: same width, same height, rendered in ink so the pair reads as one control.</p></div>
+    <div class="card f-rec">{{LOGO_LIGHT}}<h3>● Record <span>the “o”</span></h3><p>The o is a solid record dot and the only red in the system. Keep it red in every full-color version.</p></div>
+  </div>
+
+  <h2>Color versions</h2>
+  <div class="grid2">
+    <div><div class="tile" style="background:#fff"><img src="logo/viddeo-logo.svg" alt="viddeo"></div><div class="label">Primary · on light</div></div>
+    <div><div class="tile dark"><img src="logo/viddeo-logo-dark.svg" alt="viddeo"></div><div class="label">Primary · on dark</div></div>
+    <div><div class="tile" style="background:#fff"><img src="logo/viddeo-logo-mono.svg" alt="viddeo"></div><div class="label">One color · ink</div></div>
+    <div><div class="tile photo"><img src="logo/viddeo-logo-mono-white.svg" alt="viddeo"></div><div class="label">One color · white, for imagery and video overlays</div></div>
+  </div>
+
+  <h2>Palette</h2>
+  <div class="palette">
+    <div class="swatch"><div class="chip" style="background:#2563FF">Letters</div><div class="meta"><b>Cut Blue</b>#2563FF · dark UI #5B8CFF<br>rgb 37 99 255</div></div>
+    <div class="swatch"><div class="chip" style="background:#0D1321">Controls</div><div class="meta"><b>Studio Ink</b>#0D1321 · dark UI #F4F6FB<br>rgb 13 19 33</div></div>
+    <div class="swatch"><div class="chip" style="background:#FF3B3B">Record</div><div class="meta"><b>Rec Red</b>#FF3B3B · dark UI #FF4747<br>rgb 255 59 59</div></div>
+  </div>
+
+  <h2>App icon</h2>
+  <div class="card icons">
+    <figure><img src="logo/viddeo-icon.svg" width="180" height="180" alt=""><figcaption>Dark · 180</figcaption></figure>
+    <figure><img src="logo/viddeo-icon-light.svg" width="180" height="180" alt=""><figcaption>Light · 180</figcaption></figure>
+    <figure><img src="logo/viddeo-icon.svg" width="64" height="64" alt=""><figcaption>64</figcaption></figure>
+    <figure><img src="logo/viddeo-icon.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure>
+    <figure><img src="logo/viddeo-icon.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure>
+  </div>
+
+  <h2>Clear space &amp; minimum size</h2>
+  <div class="grid2">
+    <div class="card clear"><div class="box"><span class="x">x = height of the record dot</span><img src="logo/viddeo-logo.svg" alt="viddeo"></div></div>
+    <div class="card sizes">
+      <figure><img src="logo/viddeo-logo.svg" style="height:48px" alt=""><div class="label">48 px</div></figure>
+      <figure><img src="logo/viddeo-logo.svg" style="height:24px" alt=""><div class="label">24 px</div></figure>
+      <figure><img src="logo/viddeo-logo.svg" style="height:16px" alt=""><div class="label">16 px minimum. Below this, use the app icon.</div></figure>
+    </div>
+  </div>
+
+</main>
+<script>
+  function replay() {
+    const el = document.getElementById('hero');
+    el.classList.remove('anim'); void el.offsetWidth; el.classList.add('anim');
+  }
+</script>
+</body>
+</html>
