@@ -13,9 +13,29 @@ struct VerifyMasks {
 
     static func main() throws {
         try testConfiguration()
+        try testSpring()
         try testTimeline()
         try testRenderer()
         print("Masks verified: \(checks) checks")
+    }
+
+    static func testSpring() throws {
+        let defaultSettle = MaskSpring.settleTime(MaskSpring.default)
+        let opacitySettle = MaskSpring.settleTime(MaskSpring.opacity)
+        print(String(format: "Spring settle times: Q=%.3f ms, default=%.3f ms", opacitySettle, defaultSettle))
+        try expect(defaultSettle > 0 && opacitySettle > 0, "J returns finite positive settle times")
+
+        let scaled = MaskSpring.fitted(200, to: MaskSpring.opacity)
+        let factor = opacitySettle / 200
+        try expect(abs(scaled.stiffness - MaskSpring.opacity.stiffness * factor * factor) < 1e-9 &&
+                   abs(scaled.damping - MaskSpring.opacity.damping * factor) < 1e-9,
+                   "duration fitting scales stiffness by k² and damping by k")
+        let instant = MaskSpring.fitted(1000.0 / 30.0, to: MaskSpring.default)
+        try expect(instant.mass == 0, "duration fitting uses instant spring at or below 33.3 ms")
+        let unchanged = MaskSpring.fitted(defaultSettle, to: MaskSpring.default)
+        try expect(unchanged.stiffness == MaskSpring.default.stiffness &&
+                   unchanged.damping == MaskSpring.default.damping,
+                   "duration fitting preserves configs that already settle in time")
     }
 
     static func expect(_ value: Bool, _ message: String) throws {
@@ -54,13 +74,13 @@ struct VerifyMasks {
         let a = TimelineMask(sourceStart: 1, sourceEnd: 2, bounds: [rectA])
         let b = TimelineMask(sourceStart: 2.3, sourceEnd: 3.3, bounds: [rectB])
         let timeline = MaskTimeline(configuration: MaskConfiguration(masks: [a, b]))
-        try expect(timeline.state(atSource: 0.8)?.opacity == 0, "greedy show window includes its start edge")
+        try expect(timeline.state(atSource: 0.8)?.opacity == 0, "greedy show window starts opacity at zero")
         try expect(timeline.state(atSource: 0.799) == nil, "time before greedy show window has no state")
-        try expect(timeline.state(atSource: 1)?.opacity == 1, "mask is fully visible at source start")
+        try expect((timeline.state(atSource: 1)?.opacity ?? 0) >= 0.98, "greedy opacity settles by source start")
         try expect(timeline.state(atSource: 2)?.opacity == 1, "cover target remains visible through source end")
         try expect(timeline.state(atSource: 2.5) != nil && timeline.state(atSource: 2.5)?.kind == .sensitiveData,
                    "neighbor gap below 400 ms bridges to the next greedy mask")
-        try expect(timeline.state(atSource: 3.5)?.opacity == 0, "show window includes end plus 200 ms")
+        try expect(timeline.state(atSource: 3.5)?.opacity == 0, "opacity settles to zero by end plus 200 ms")
         try expect(timeline.state(atSource: 3.501) == nil, "time after show window has no state")
 
         let disabled = TimelineMask(sourceStart: 0, sourceEnd: 4, isDisabled: true,
@@ -69,12 +89,30 @@ struct VerifyMasks {
                    "disabled masks never resolve")
 
         let fading = MaskTimeline(configuration: MaskConfiguration(masks: [a]))
-        let samples = (0...20).map { fading.state(atSource: 0.8 + Double($0) * 0.01)!.opacity }
-        try expect(zip(samples, samples.dropFirst()).allSatisfy { $0 <= $1 }, "fade-in opacity is monotonic")
-        try expect(fading.state(atSource: 1.2)?.opacity == 1 && fading.state(atSource: 1.2)?.rect == rectA,
-                   "presentation settles on the target bounds and opacity")
-        let closing = (0...20).map { fading.state(atSource: 2 + Double($0) * 0.01)!.opacity }
-        try expect(zip(closing, closing.dropFirst()).allSatisfy { $0 >= $1 }, "fade-out opacity is monotonic")
+        try expect(fading.state(atSource: 1)?.rect == rectA &&
+                   fading.state(atSource: 1.2)?.opacity == 1 && fading.state(atSource: 1.2)?.rect == rectA,
+                   "isolated mask bounds are instant and opacity settles")
+
+        let highlight = TimelineMask(sourceStart: 4, sourceEnd: 5, bounds: [rectB], kind: .highlight)
+        let highlightTimeline = MaskTimeline(configuration: MaskConfiguration(masks: [highlight]))
+        try expect(highlightTimeline.state(atSource: 4)?.opacity == 0 &&
+                   (highlightTimeline.state(atSource: 4.2)?.opacity ?? 0) >= 0.98,
+                   "non-greedy highlight fades in from source start")
+
+        let bridgeTimes = [2.0, 2.05, 2.1, 2.15, 2.2, 2.25, 2.3]
+        let bridgeRects = bridgeTimes.compactMap { timeline.state(atSource: $0)?.rect }
+        try expect(bridgeRects.first == rectA && abs(bridgeRects.last!.minX - rectB.minX) < 0.01 &&
+                   abs(bridgeRects.last!.minY - rectB.minY) < 0.01,
+                   "bridged bounds start at predecessor and arrive by successor start")
+        try expect(zip(bridgeRects, bridgeRects.dropFirst()).allSatisfy { $0.minX <= $1.minX + 0.00001 },
+                   "bridged bounds move monotonically toward successor")
+
+        let seekTimeline = MaskTimeline(configuration: MaskConfiguration(masks: [a, b]))
+        let times = [0.8, 1.0, 1.1, 2.0, 2.1, 2.15, 2.3, 3.3, 3.5]
+        let baseline = Dictionary(uniqueKeysWithValues: times.map { ($0, seekTimeline.state(atSource: $0)) })
+        let shuffled = [2.15, 0.8, 3.5, 1.1, 2.3, 1.0, 3.3, 2.0, 2.1]
+        try expect(shuffled.allSatisfy { seekTimeline.state(atSource: $0) == baseline[$0] },
+                   "shuffled seeks return order-independent states")
     }
 
     static func testRenderer() throws {

@@ -100,6 +100,125 @@ struct MaskFrameState: Sendable, Equatable {
     var blur: Double
 }
 
+/// The spring semantics used by the decoded resolver in Dhx_4d1o.js.
+enum MaskSpring {
+    struct Configuration: Sendable, Equatable {
+        var stiffness: Double
+        var damping: Double
+        var mass: Double
+        var clamp: Bool
+        var precision: Double
+    }
+
+    static let instant = Configuration(stiffness: 1, damping: 1, mass: 0, clamp: false, precision: 0.002)
+    static let `default` = Configuration(stiffness: 125, damping: 12, mass: 1.5, clamp: true, precision: 0.002)
+    static let opacity = Configuration(stiffness: 530, damping: 40, mass: 1, clamp: true, precision: 0.002)
+    private static let cachedDefaultSettle = calculateSettleTime(`default`)
+    private static let cachedOpacitySettle = calculateSettleTime(opacity)
+
+    static func settleTime(_ config: Configuration) -> Double {
+        if config == `default` { return cachedDefaultSettle }
+        if config == opacity { return cachedOpacitySettle }
+        return calculateSettleTime(config)
+    }
+
+    private static func calculateSettleTime(_ config: Configuration) -> Double {
+        guard config.mass != 0 else { return 0 }
+        let target = 1000.0
+        var value = 0.0
+        var velocity = 0.000001
+        var elapsed = 0.0
+        var step = 1000.0 / 60.0
+        if step / 1000 * max(sqrt(config.stiffness / config.mass), config.damping / config.mass) > 0.5 {
+            step = 1
+        }
+        for _ in 0..<20_000 {
+            let next = advance(value: value, velocity: velocity, target: target, milliseconds: step, config: config)
+            value = next.value
+            velocity = next.velocity
+            elapsed += step
+            if velocity == 0 && value == target { return elapsed }
+        }
+        return elapsed
+    }
+
+    static func fitted(_ duration: Double, to base: Configuration) -> Configuration {
+        let cfg = base
+        let settle = settleTime(cfg)
+        guard settle > duration else { return cfg }
+        guard duration > 2 * (1000.0 / 60.0) else { return instant }
+        let scale = settle / duration
+        return Configuration(stiffness: cfg.stiffness * scale * scale,
+                             damping: cfg.damping * scale, mass: cfg.mass,
+                             clamp: cfg.clamp, precision: cfg.precision)
+    }
+
+    /// One resolver step, matching W/K: semi-implicit Euler, adaptive 1 ms/60 Hz steps,
+    /// critical-damping correction while clamp is enabled, and the resolver's rest test.
+    static func advance(value: Double, velocity: Double, target: Double, milliseconds: Double,
+                        config: Configuration) -> (value: Double, velocity: Double) {
+        guard config.mass != 0 else { return (target, 0) }
+        var value = value
+        var velocity = velocity
+        let count = Int(ceil(milliseconds))
+        guard count > 0 else { return (value, velocity) }
+        for index in 1...count {
+            let step = Double(index) > milliseconds ? Double(index) - milliseconds : 1
+            let next = singleStep(value: value, velocity: velocity, target: target,
+                                  milliseconds: step, config: config)
+            value = next.value
+            velocity = next.velocity
+            if velocity == 0 && value == target { break }
+        }
+        return (value, velocity)
+    }
+
+    private static func singleStep(value: Double, velocity: Double, target: Double, milliseconds: Double,
+                                   config: Configuration) -> (value: Double, velocity: Double) {
+        var damping = config.damping
+        let delta = target - value
+        if config.clamp && velocity * delta > 0 {
+            let velocityLimit = abs(delta) * sqrt(config.stiffness / config.mass)
+            if abs(velocity) > velocityLimit {
+                damping = max(damping, 2 * sqrt(config.mass * config.stiffness))
+            }
+        }
+        let dt = milliseconds / 1000
+        let acceleration = (-(value - target) * config.stiffness - velocity * damping) / config.mass
+        let nextVelocity = velocity + acceleration * dt
+        let nextValue = value + nextVelocity * dt
+        let precision = max(1, abs(value), abs(target)) * config.precision
+        if abs(nextVelocity) < precision && abs(nextValue - target) < precision { return (target, 0) }
+        return (nextValue, nextVelocity)
+    }
+
+    static func response(from start: Double, to target: Double, elapsed: Double,
+                         config: Configuration, settleAfter: Double? = nil) -> Double {
+        guard elapsed > 0 else { return start }
+        if let settleAfter, elapsed >= settleAfter { return target }
+        guard config.mass != 0 else { return target }
+        var value = start
+        var velocity = 0.0
+        var time = 0.0
+        let step = integrationStep(config)
+        while time < elapsed {
+            let dt = min(step, elapsed - time)
+            let next = advance(value: value, velocity: velocity, target: target,
+                               milliseconds: dt, config: config)
+            value = next.value
+            velocity = next.velocity
+            time += dt
+            if velocity == 0 && value == target { return target }
+        }
+        return value
+    }
+
+    private static func integrationStep(_ config: Configuration) -> Double {
+        let frame = 1000.0 / 60.0
+        return frame / 1000 * max(sqrt(config.stiffness / config.mass), config.damping / config.mass) <= 0.5 ? frame : 1
+    }
+}
+
 /// Source-time mask selection and deterministic presentation. Evaluations are seekable and do not
 /// depend on frame order. Apply its state to the source footage before zoom/crop to keep it attached
 /// to source pixels; ExportFrameRenderer needs only `state(atSource:)` and `MaskRenderer.apply`.
@@ -144,26 +263,42 @@ struct MaskTimeline: Sendable {
         guard let item = selected, Self.canShow(item), let target = item.mask.bounds.first else { return nil }
 
         let showStart = Self.showStart(item)
-        let end = item.mask.sourceEnd
-        let opacity: Double
-        if t < item.mask.sourceStart {
-            opacity = Self.easeOut((t - showStart) / max(0.001, item.mask.sourceStart - showStart))
-        } else if t <= end {
-            opacity = 1
-        } else {
-            opacity = 1 - Self.easeOut((t - end) / 0.2)
+        var opacity = 0.0
+        if t >= showStart {
+            let fittedOpacity = MaskSpring.fitted(200, to: MaskSpring.opacity)
+            if t <= item.mask.sourceEnd {
+                opacity = MaskSpring.response(from: 0, to: 1, elapsed: (t - showStart) * 1000,
+                                              config: fittedOpacity, settleAfter: 200)
+            } else {
+                let closingStart = item.mask.sourceEnd
+                let fittedValue = MaskSpring.response(from: 0, to: 1,
+                                                      elapsed: (closingStart - showStart) * 1000,
+                                                      config: fittedOpacity)
+                opacity = MaskSpring.response(from: fittedValue, to: 0,
+                                              elapsed: (t - closingStart) * 1000,
+                                              config: fittedOpacity, settleAfter: 200)
+            }
         }
 
         var rect = target
+        var resolvedHighlightOpacity = item.mask.highlightOpacity
         if let predecessor = items.last(where: { Self.canShow($0) && $0.mask.sourceEnd <= item.mask.sourceStart }),
            item.mask.sourceStart - predecessor.mask.sourceEnd < 0.4,
            let previousRect = predecessor.mask.bounds.first {
-            let duration = max(0.001, item.mask.sourceStart - predecessor.mask.sourceEnd + (item.isGreedy ? 0 : 0.2))
-            let progress = Self.easeOut((t - (item.mask.sourceStart - duration)) / duration)
-            rect = Self.interpolate(previousRect, target, progress: progress)
+            let gapMs = (item.mask.sourceStart - predecessor.mask.sourceEnd) * 1000
+            let duration = gapMs + (item.isGreedy ? 0 : 200)
+            let config = MaskSpring.fitted(duration, to: MaskSpring.default)
+            let transitionStart = predecessor.mask.sourceEnd
+            rect = Self.springRect(from: previousRect, to: target,
+                                   elapsed: (t - transitionStart) * 1000, config: config,
+                                   settleAfter: duration)
+            resolvedHighlightOpacity = MaskSpring.response(from: predecessor.mask.highlightOpacity,
+                                                            to: item.mask.highlightOpacity,
+                                                            elapsed: (t - transitionStart) * 1000,
+                                                            config: config, settleAfter: duration)
         }
         return MaskFrameState(rect: rect, kind: item.mask.kind,
-                              highlightOpacity: min(1, max(0, item.mask.highlightOpacity)),
+                              highlightOpacity: min(1, max(0, resolvedHighlightOpacity)),
                               opacity: min(1, max(0, opacity)), blur: max(0, item.mask.blur))
     }
 
@@ -183,14 +318,14 @@ struct MaskTimeline: Sendable {
         item.mask.sourceStart - (item.isGreedy ? 0.2 : 0)
     }
 
-    private static func easeOut(_ value: Double) -> Double {
-        let x = min(1, max(0, value))
-        return 1 - pow(1 - x, 3)
-    }
-
-    private static func interpolate(_ a: CGRect, _ b: CGRect, progress p: Double) -> CGRect {
-        CGRect(x: a.minX + (b.minX - a.minX) * p, y: a.minY + (b.minY - a.minY) * p,
-               width: a.width + (b.width - a.width) * p, height: a.height + (b.height - a.height) * p)
+    private static func springRect(from a: CGRect, to b: CGRect, elapsed: Double,
+                                   config: MaskSpring.Configuration, settleAfter: Double) -> CGRect {
+        func value(_ start: CGFloat, _ target: CGFloat) -> CGFloat {
+            CGFloat(MaskSpring.response(from: Double(start), to: Double(target), elapsed: elapsed,
+                                        config: config, settleAfter: settleAfter))
+        }
+        return CGRect(x: value(a.minX, b.minX), y: value(a.minY, b.minY),
+                      width: value(a.width, b.width), height: value(a.height, b.height))
     }
 }
 
