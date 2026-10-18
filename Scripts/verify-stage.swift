@@ -85,6 +85,12 @@ struct VerifyStage {
         try check(try StageStyle.load(in: empty) == StageStyle(), "missing sidecar is not the legacy default")
         try StageStyle.writeNewRecordingDefault(in: empty)
         try check(try StageStyle.load(in: empty) == fresh, "new-recording sidecar did not round-trip")
+        let windowDefaults = directory.appendingPathComponent("new-window-defaults", isDirectory: true)
+        try FileManager.default.createDirectory(at: windowDefaults, withIntermediateDirectories: true)
+        try StageStyle.writeNewRecordingDefault(in: windowDefaults, cornerRadius: 16)
+        let windowStyle = try StageStyle.load(in: windowDefaults)
+        try check(windowStyle.cornerRadius == 16 && windowStyle.paddingRatio == fresh.paddingRatio
+                  && windowStyle.background == fresh.background, "window/area new-recording default is not radius 16")
         // Radius 0 reaches the pixels: the content corner is not rounded away, unlike radius 16.
         func cornerIsContent(_ style: StageStyle) throws -> Bool {
             let stage = try StageRenderer(style: style, outputSize: output)

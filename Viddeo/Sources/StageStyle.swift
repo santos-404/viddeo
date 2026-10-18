@@ -146,8 +146,12 @@ struct StageStyle: Codable, Sendable, Equatable {
     /// `project.json` says so or, absent that flag, when `stage-config.json` exists. A brand-new session has no
     /// `project.json`, so the sidecar switches the stage on, while a legacy session (no sidecar, or a saved
     /// `stageEnabled`) is read exactly as before, and nothing here changes `StageStyle()` or the decoder defaults.
-    static func writeNewRecordingDefault(in directory: URL) throws {
-        try newRecordingDefault.save(in: directory)
+    /// `cornerRadius` follows the recorded source: the reference resolves 0 for full-display recordings and 16
+    /// for window/area recordings (docs/research/recording-sources.md, main 1,572,160–1,575,100).
+    static func writeNewRecordingDefault(in directory: URL, cornerRadius: Double = 0) throws {
+        var style = newRecordingDefault
+        style.cornerRadius = cornerRadius
+        try style.save(in: directory)
     }
 
     static let referenceHeight = 1080.0

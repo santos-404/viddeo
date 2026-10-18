@@ -212,7 +212,7 @@ final class RecordingViewModel {
                 session = completed
                 sessionDirectory = directory
                 exportedURL = nil
-                let defaultsError = writeNewRecordingDefaults(to: directory)
+                let defaultsError = writeNewRecordingDefaults(to: directory, source: completed.recordingSource?.kind ?? .display)
                 let presetError = applyPresets(from: directory)
                 let editorError = openEditor(session: completed, directory: directory)
                 phase = .idle
@@ -365,15 +365,15 @@ final class RecordingViewModel {
     }
 
     /// Gives a just-finished recording the reference's new-project defaults (stage on over viddeo's own
-    /// wallpaper with padding 0.1 and radius 0, click effect off) by writing the sidecars the editor already
+    /// wallpaper with padding 0.1, radius 0 for displays and 16 for windows/areas, click effect off) by writing the sidecars the editor already
     /// reads. The files are the new-versus-legacy marker: only this path writes them before a project exists, so
     /// sessions recorded earlier (no sidecars, or a saved project) keep their behaviour. Nothing is overwritten.
-    private func writeNewRecordingDefaults(to directory: URL) -> String? {
+    private func writeNewRecordingDefaults(to directory: URL, source: RecordingSourceKind) -> String? {
         let manager = FileManager.default
         guard !manager.fileExists(atPath: directory.appendingPathComponent(ViddeoProject.filename).path) else { return nil }
         do {
             if !manager.fileExists(atPath: directory.appendingPathComponent("stage-config.json").path) {
-                try StageStyle.writeNewRecordingDefault(in: directory)
+                try StageStyle.writeNewRecordingDefault(in: directory, cornerRadius: source == .display ? 0 : 16)
             }
             if !manager.fileExists(atPath: directory.appendingPathComponent("click-config.json").path) {
                 try ClickEffectConfiguration.newRecordingDefault.save(in: directory)
