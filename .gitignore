@@ -25,3 +25,8 @@ __pycache__/
 
 # Generated brand showcase (source: brand/sheet.template.html)
 /brand/index.html
+
+# Local agent research and execution documents
+/docs/research/
+/docs/plan.md
+/docs/spec.md

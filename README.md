@@ -74,7 +74,7 @@ Run the verification suite:
 
 The suite checks capture and export behavior with synthetic media. Live recording, device permissions, and audio/video sync also need hands-on testing.
 
-Explore the [architecture](docs/architecture.md), [specification](docs/spec.md), and [development plan](docs/plan.md).
+Explore the [architecture](docs/architecture.md) and [live testing checklist](docs/live-acceptance.md).
 
 ## License
 
