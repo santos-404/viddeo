@@ -153,5 +153,5 @@ xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
 .build/verify-delivery
 
 xcrun swiftc -swift-version 6 -target "$VIDDEO_TARGET" -parse-as-library \
-  Viddeo/Sources/Masks.swift Scripts/verify-masks.swift -o .build/verify-masks
+  Viddeo/Sources/Spring.swift Viddeo/Sources/Masks.swift Scripts/verify-masks.swift -o .build/verify-masks
 .build/verify-masks

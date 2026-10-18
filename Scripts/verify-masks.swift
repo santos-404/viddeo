@@ -20,21 +20,22 @@ struct VerifyMasks {
     }
 
     static func testSpring() throws {
-        let defaultSettle = MaskSpring.settleTime(MaskSpring.default)
-        let opacitySettle = MaskSpring.settleTime(MaskSpring.opacity)
-        print(String(format: "Spring settle times: Q=%.3f ms, default=%.3f ms", opacitySettle, defaultSettle))
-        try expect(defaultSettle > 0 && opacitySettle > 0, "J returns finite positive settle times")
+        let defaultSettle = SpringConfiguration.screen.settleTimeMilliseconds
+        let opacitySettle = SpringConfiguration.presetQ.settleTimeMilliseconds
+        print(String(format: "Spring settle times: J(default)=%.3f ms, J(Q)=%.3f ms", defaultSettle, opacitySettle))
+        try expect(abs(defaultSettle - 1483.333333) < 0.01 && abs(opacitySettle - 483) < 0.01,
+                   "J settle times match the decoded default and Q springs")
 
-        let scaled = MaskSpring.fitted(200, to: MaskSpring.opacity)
+        let scaled = SpringConfiguration.presetQ.fitted(toDurationMilliseconds: 200)
         let factor = opacitySettle / 200
-        try expect(abs(scaled.stiffness - MaskSpring.opacity.stiffness * factor * factor) < 1e-9 &&
-                   abs(scaled.damping - MaskSpring.opacity.damping * factor) < 1e-9,
+        try expect(abs(scaled.stiffness - SpringConfiguration.presetQ.stiffness * factor * factor) < 1e-9 &&
+                   abs(scaled.damping - SpringConfiguration.presetQ.damping * factor) < 1e-9,
                    "duration fitting scales stiffness by k² and damping by k")
-        let instant = MaskSpring.fitted(1000.0 / 30.0, to: MaskSpring.default)
+        let instant = SpringConfiguration.screen.fitted(toDurationMilliseconds: 1000.0 / 30.0)
         try expect(instant.mass == 0, "duration fitting uses instant spring at or below 33.3 ms")
-        let unchanged = MaskSpring.fitted(defaultSettle, to: MaskSpring.default)
-        try expect(unchanged.stiffness == MaskSpring.default.stiffness &&
-                   unchanged.damping == MaskSpring.default.damping,
+        let unchanged = SpringConfiguration.screen.fitted(toDurationMilliseconds: defaultSettle)
+        try expect(unchanged.stiffness == SpringConfiguration.screen.stiffness &&
+                   unchanged.damping == SpringConfiguration.screen.damping,
                    "duration fitting preserves configs that already settle in time")
     }
 
